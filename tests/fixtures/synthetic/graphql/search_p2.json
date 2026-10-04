@@ -1,0 +1,42 @@
+{
+  "data": {
+    "rateLimit": {"cost": 1, "remaining": 4988, "resetAt": "2025-02-01T00:00:00Z"},
+    "search": {
+      "issueCount": 3,
+      "pageInfo": {"hasNextPage": false, "endCursor": "CURSOR_PAGE_2"},
+      "nodes": [
+        {
+          "number": 103,
+          "title": "Backport clamp fix to the stable branch",
+          "url": "https://github.com/synthetic/tinylib/pull/103",
+          "mergedAt": "2025-01-20T15:00:00Z",
+          "baseRefName": "stable",
+          "author": {"__typename": "User", "login": "bob"},
+          "labels": {"nodes": []},
+          "mergeCommit": {"oid": "3333333333333333333333333333333333333333"},
+          "commits": {"totalCount": 1},
+          "files": {
+            "totalCount": 2,
+            "nodes": [
+              {"path": "src/tinylib/clamp.py", "additions": 1, "deletions": 1, "changeType": "MODIFIED"},
+              {"path": "tests/test_clamp.py", "additions": 4, "deletions": 0, "changeType": "MODIFIED"}
+            ]
+          },
+          "closingIssuesReferences": {
+            "totalCount": 1,
+            "nodes": [
+              {
+                "number": 99,
+                "title": "clamp() returns the lower bound above the range",
+                "body": "clamp(42, 0, 10) returns 0 but I expected 10.",
+                "state": "CLOSED",
+                "createdAt": "2025-01-05T09:00:00Z",
+                "repository": {"nameWithOwner": "synthetic/tinylib"}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

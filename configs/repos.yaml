@@ -13,9 +13,13 @@ limits:
   max_test_runtime_s: 120
 
 repos:
-  - name: TODO-owner/TODO-repo   # GitHub owner/name
-    license: TODO                # SPDX id, must be permissive
-    python_version: TODO         # e.g. the minor version its CI uses
-    install_cmd: TODO            # runs at image build time (the sandbox has no network)
-    test_cmd: TODO               # pytest invocation used for fail_to_pass / pass_to_pass
-    notes: ""
+  - name: pallets/click
+    license: BSD-3-Clause        # checked against GitHub's licenseInfo.spdxId at mine time
+    # Pinned exact patch release (uv python install). click's own CI matrix covers 3.10-3.14 and
+    # its pytest config turns warnings into errors, so a fixed interpreter matters.
+    python_version: "3.12.13"
+    # Runs at image build time (network on) with the repo at /workspace: editable install plus the
+    # `tests` dependency group. Editable matters: click's tests call importlib.metadata.
+    install_cmd: uv pip install --group tests -e .
+    test_cmd: python -m pytest   # pytest picks up click's own config (testpaths, markers)
+    notes: "src/ layout, flit_core backend; ~2.2k tests in ~5s natively (measured 2026-10-04)."

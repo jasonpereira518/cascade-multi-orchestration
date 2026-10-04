@@ -1,0 +1,60 @@
+{
+  "data": {
+    "rateLimit": {"cost": 1, "remaining": 4989, "resetAt": "2025-02-01T00:00:00Z"},
+    "search": {
+      "issueCount": 3,
+      "pageInfo": {"hasNextPage": true, "endCursor": "CURSOR_PAGE_1"},
+      "nodes": [
+        {
+          "number": 101,
+          "title": "Fix clamp for values above the range",
+          "url": "https://github.com/synthetic/tinylib/pull/101",
+          "mergedAt": "2025-01-10T12:00:00Z",
+          "baseRefName": "main",
+          "author": {"__typename": "User", "login": "alice"},
+          "labels": {"nodes": [{"name": "bug"}]},
+          "mergeCommit": {"oid": "1111111111111111111111111111111111111111"},
+          "commits": {"totalCount": 1},
+          "files": {
+            "totalCount": 3,
+            "nodes": [
+              {"path": "src/tinylib/clamp.py", "additions": 1, "deletions": 1, "changeType": "MODIFIED"},
+              {"path": "tests/test_clamp.py", "additions": 4, "deletions": 0, "changeType": "MODIFIED"},
+              {"path": "CHANGES.md", "additions": 1, "deletions": 0, "changeType": "MODIFIED"}
+            ]
+          },
+          "closingIssuesReferences": {
+            "totalCount": 1,
+            "nodes": [
+              {
+                "number": 99,
+                "title": "clamp() returns the lower bound above the range",
+                "body": "clamp(42, 0, 10) returns 0 but I expected 10.",
+                "state": "CLOSED",
+                "createdAt": "2025-01-05T09:00:00Z",
+                "repository": {"nameWithOwner": "synthetic/tinylib"}
+              }
+            ]
+          }
+        },
+        {
+          "number": 102,
+          "title": "Bump pytest from 8.0.0 to 8.1.0",
+          "url": "https://github.com/synthetic/tinylib/pull/102",
+          "mergedAt": "2025-01-12T08:30:00Z",
+          "baseRefName": "main",
+          "author": {"__typename": "Bot", "login": "dependabot"},
+          "labels": {"nodes": [{"name": "dependencies"}]},
+          "mergeCommit": {"oid": "2222222222222222222222222222222222222222"},
+          "commits": {"totalCount": 1},
+          "files": {
+            "totalCount": 1,
+            "nodes": [{"path": "uv.lock", "additions": 6, "deletions": 6, "changeType": "MODIFIED"}]
+          },
+          "closingIssuesReferences": {"totalCount": 0, "nodes": []}
+        },
+        {}
+      ]
+    }
+  }
+}

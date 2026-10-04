@@ -195,6 +195,23 @@ class RepoSpec(_Strict):
     notes: str = ""
 
 
+class ResolvedRepo(_Strict):
+    """One repo's job parameters with every TODO filled in."""
+
+    name: str
+    license: str
+    python_version: str
+    install_cmd: str
+    test_cmd: str
+    window_start: dt.date
+    window_end: dt.date
+    limits: SelectionLimits
+
+    @property
+    def slug(self) -> str:
+        return self.name.replace("/", "__")
+
+
 class ReposConfig(_Strict):
     date_window: DateWindow
     limits: SelectionLimits = Field(default_factory=SelectionLimits)
@@ -202,6 +219,33 @@ class ReposConfig(_Strict):
 
     def unfilled(self) -> list[str]:
         return find_todos(self)
+
+    def resolve(self, name: str) -> ResolvedRepo:
+        """Return the named repo's parameters, or raise if any field it needs is still TODO.
+
+        Only the date window and the named repo are checked; other repos may stay unfilled.
+        """
+        spec = next((r for r in self.repos if r.name == name), None)
+        if spec is None:
+            raise ValueError(f"repo {name!r} is not listed in repos.yaml")
+        todos = find_todos(self.date_window, "date_window") + find_todos(spec, f"repos[{name}]")
+        if todos:
+            raise ConfigNotFilledError(todos)
+        start, end = self.date_window.start, self.date_window.end
+        if isinstance(start, str) or isinstance(end, str):  # unreachable: TODOs raised above
+            raise ConfigNotFilledError(["date_window"])
+        if start > end:
+            raise ValueError("date_window.start must be on or before date_window.end")
+        return ResolvedRepo(
+            name=spec.name,
+            license=spec.license,
+            python_version=spec.python_version,
+            install_cmd=spec.install_cmd,
+            test_cmd=spec.test_cmd,
+            window_start=start,
+            window_end=end,
+            limits=self.limits,
+        )
 
 
 # --- loading -----------------------------------------------------------------------------------

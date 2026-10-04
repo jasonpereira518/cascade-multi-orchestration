@@ -148,7 +148,7 @@ class SandboxResult:
 
 class RunFn(Protocol):
     def __call__(
-        self, argv: Sequence[str], timeout: float | None
+        self, argv: Sequence[str], timeout: float | None, /
     ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -164,22 +164,25 @@ def _text(value: str | bytes | None) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else value
 
 
-class SandboxRunner:
+class ContainerRunner:
+    """Hardened `docker run` with the network off. Subclasses decide what may be mounted.
+
+    All isolation flags live here so the agent-side SandboxRunner and the grading runner cannot
+    drift apart: network none, dropped capabilities, read-only root, resource limits, no host env.
+    """
+
     def __init__(
         self,
-        guard: LeakGuard,
         *,
         sandbox_root: Path,
         docker_bin: str = "docker",
         run_fn: RunFn = _default_run,
     ) -> None:
-        self._guard = guard
         self._root = sandbox_root.resolve()
         self._docker = docker_bin
         self._run = run_fn
 
-    def validate(self, spec: SandboxSpec) -> Path:
-        """Return the resolved workspace, or raise if mounting it could leak or escape."""
+    def _validate_common(self, spec: SandboxSpec) -> Path:
         ws = spec.workspace.resolve()
         if not ws.is_dir():
             raise SandboxError(f"workspace is not a directory: {ws}")
@@ -187,17 +190,14 @@ class SandboxRunner:
             raise SandboxError(f"workspace must be inside sandbox root {self._root}: {ws}")
         if "," in str(ws):
             raise SandboxError("workspace path must not contain commas (docker --mount syntax)")
-        for forbidden in self._guard.forbidden_host_paths:
-            fp = forbidden.resolve()
-            if fp == ws or fp.is_relative_to(ws) or ws.is_relative_to(fp):
-                raise LeakError([f"mount {ws} overlaps forbidden host path {fp}"])
         for name in spec.env:
             if not _ENV_NAME.fullmatch(name) or _SECRET_ENV.search(name):
                 raise SandboxError(f"refusing to pass env var {name!r} into the sandbox")
-        violations = self._guard.scan(ws)
-        if violations:
-            raise LeakError(violations)
         return ws
+
+    def validate(self, spec: SandboxSpec) -> Path:
+        """Return the resolved workspace, or raise if it may not be mounted."""
+        return self._validate_common(spec)
 
     def build_command(self, spec: SandboxSpec, argv: Sequence[str], *, name: str) -> list[str]:
         ws = self.validate(spec)
@@ -247,3 +247,29 @@ class SandboxRunner:
             timed_out=False,
             duration_s=time.monotonic() - start,
         )
+
+
+class SandboxRunner(ContainerRunner):
+    """Agent-side runner: refuses any workspace that could expose gold/test data or history."""
+
+    def __init__(
+        self,
+        guard: LeakGuard,
+        *,
+        sandbox_root: Path,
+        docker_bin: str = "docker",
+        run_fn: RunFn = _default_run,
+    ) -> None:
+        super().__init__(sandbox_root=sandbox_root, docker_bin=docker_bin, run_fn=run_fn)
+        self._guard = guard
+
+    def validate(self, spec: SandboxSpec) -> Path:
+        ws = self._validate_common(spec)
+        for forbidden in self._guard.forbidden_host_paths:
+            fp = forbidden.resolve()
+            if fp == ws or fp.is_relative_to(ws) or ws.is_relative_to(fp):
+                raise LeakError([f"mount {ws} overlaps forbidden host path {fp}"])
+        violations = self._guard.scan(ws)
+        if violations:
+            raise LeakError(violations)
+        return ws

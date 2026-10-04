@@ -1,0 +1,13 @@
+{
+  "data": {
+    "rateLimit": {"cost": 1, "remaining": 4990, "resetAt": "2025-02-01T00:00:00Z"},
+    "repository": {
+      "nameWithOwner": "synthetic/tinylib",
+      "isArchived": false,
+      "stargazerCount": 1234,
+      "pushedAt": "2025-01-31T00:00:00Z",
+      "licenseInfo": {"spdxId": "BSD-3-Clause"},
+      "defaultBranchRef": {"name": "main"}
+    }
+  }
+}

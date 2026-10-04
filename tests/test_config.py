@@ -44,7 +44,8 @@ def test_shipped_configs_load_and_report_todos() -> None:
     assert "models[0].input_usd_per_mtok" in models.unfilled()
     assert "global_cap_usd" in budget.unfilled()
     assert "date_window.start" in repos.unfilled()
-    assert "repos[0].name" in repos.unfilled()
+    # click's repo-specific fields are filled; only the human-owned date window remains.
+    assert [u for u in repos.unfilled() if u.startswith("repos[")] == []
 
 
 def test_unfilled_prices_fail_closed() -> None:
@@ -137,3 +138,56 @@ def test_load_models_from_path_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "models.yaml"
     path.write_text(yaml.safe_dump(_models_dict()))
     assert load_models(path).arms[0].model == "m1"
+
+
+def test_repo_resolve_requires_window_and_named_repo() -> None:
+    repos = load_repos(CONFIGS / "repos.yaml")
+    with pytest.raises(ConfigNotFilledError) as exc:
+        repos.resolve("pallets/click")  # date window is still TODO in the shipped config
+    assert "date_window.start" in exc.value.paths
+    with pytest.raises(ValueError, match="not listed"):
+        repos.resolve("nobody/nothing")
+
+
+def test_repo_resolve_returns_filled_parameters() -> None:
+    from cascade.config import ReposConfig
+
+    cfg = ReposConfig.model_validate(
+        {
+            "date_window": {"start": "2025-01-01", "end": "2025-03-31"},
+            "repos": [
+                {
+                    "name": "o/r",
+                    "license": "MIT",
+                    "python_version": "3.12.1",
+                    "install_cmd": "uv pip install -e .",
+                    "test_cmd": "python -m pytest",
+                }
+            ],
+        }
+    )
+    resolved = cfg.resolve("o/r")
+    assert resolved.slug == "o__r"
+    assert (resolved.window_start.isoformat(), resolved.window_end.isoformat()) == (
+        "2025-01-01",
+        "2025-03-31",
+    )
+    assert resolved.limits.max_source_files == 5
+
+
+def test_repo_resolve_rejects_inverted_window() -> None:
+    from cascade.config import ReposConfig
+
+    cfg = ReposConfig.model_validate(
+        {
+            "date_window": {"start": "2025-06-01", "end": "2025-01-01"},
+            "repos": [
+                {
+                    "name": "o/r", "license": "MIT", "python_version": "3.12",
+                    "install_cmd": "x", "test_cmd": "y",
+                }
+            ],
+        }
+    )  # fmt: skip
+    with pytest.raises(ValueError, match="on or before"):
+        cfg.resolve("o/r")
