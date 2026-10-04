@@ -191,3 +191,29 @@ def test_repo_resolve_rejects_inverted_window() -> None:
     )  # fmt: skip
     with pytest.raises(ValueError, match="on or before"):
         cfg.resolve("o/r")
+
+
+def test_the_shipped_repos_all_load_and_the_license_override_reaches_the_resolved_repo() -> None:
+    repos = load_repos(CONFIGS / "repos.yaml")
+    names = [r.name for r in repos.repos]
+    assert names == [
+        "pallets/click", "pallets/jinja", "python-attrs/attrs", "hynek/structlog",
+        "marshmallow-code/marshmallow",
+    ]  # fmt: skip
+    by_name = {r.name: r for r in repos.repos}
+    assert by_name["hynek/structlog"].github_license_id == "NOASSERTION"
+    assert all(r.github_license_id is None for n, r in by_name.items() if n != "hynek/structlog")
+    assert all(r.python_version == "3.12.13" for r in repos.repos)  # one pinned interpreter
+    assert [u for u in repos.unfilled() if u.startswith("repos[")] == []
+
+    from datetime import date
+
+    filled = repos.model_copy(
+        update={
+            "date_window": repos.date_window.model_copy(
+                update={"start": date(2025, 1, 1), "end": date(2025, 6, 1)}
+            )
+        }
+    )
+    assert filled.resolve("hynek/structlog").github_license_id == "NOASSERTION"
+    assert filled.resolve("pallets/click").github_license_id is None

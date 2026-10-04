@@ -26,3 +26,47 @@ repos:
     # and after every patch. Found by running the suite in the real image on 2026-10-04.
     system_packages: [less]
     notes: "src/ layout, flit_core backend; ~2.2k tests in ~5s natively (measured 2026-10-04)."
+
+  # --- added 2026-10-04 at the human's request. Each was built and its suite run offline in the
+  # --- Docker image three times (all passing; outcomes stable except where a note says otherwise).
+  - name: pallets/jinja
+    license: BSD-3-Clause
+    python_version: "3.12.13"
+    install_cmd: uv pip install --group tests -e .
+    test_cmd: python -m pytest
+    notes: >-
+      DORMANT: its last commit to main is 2025-06-14 (0 PR landings since, checked 2026-10-04), so it
+      yields no tasks for any window after mid-2025. Config verified (911 tests, ~2 s) but skip it
+      in the run loop unless activity resumes.
+
+  - name: python-attrs/attrs
+    license: MIT
+    python_version: "3.12.13"
+    install_cmd: uv pip install --group tests -e .
+    # Serial on purpose: the tox config uses `-n auto` (xdist), but parallel workers would race on
+    # the plugin's single report file.
+    test_cmd: python -m pytest
+    notes: >-
+      hatchling backend; 1401 tests in ~6 s; 10 skips are Python-version specific. Squash merges.
+      Few issue-linked PRs (5 in the last 12 months).
+
+  - name: hynek/structlog
+    license: MIT OR Apache-2.0
+    github_license_id: NOASSERTION   # GitHub reports dual-licensed repos as NOASSERTION (verified)
+    python_version: "3.12.13"
+    install_cmd: uv pip install --group tests -e .
+    # The test group includes pytest-randomly; fixed ordering keeps the 3x flake check meaningful.
+    test_cmd: python -m pytest -p no:randomly
+    notes: >-
+      884 tests in ~1.4 s, 36 skipped for optional extras (rich, better-exceptions, colorama,
+      greenlet) that its own CI covers in separate matrix legs. PRs touching those areas will
+      attrit as no_fail_to_pass.
+
+  - name: marshmallow-code/marshmallow
+    license: MIT
+    python_version: "3.12.13"
+    install_cmd: uv pip install --group tests -e .
+    test_cmd: python -m pytest
+    notes: >-
+      Default branch is `dev`. 1190 tests in ~1.5 s. Six datetime tests embed the current time in
+      their parametrize ids, so those node ids differ per run; the flake check drops them.

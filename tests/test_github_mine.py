@@ -288,3 +288,30 @@ def test_mine_makes_no_network_calls_with_an_injected_transport(
     store = StageStore(":memory:")
     mine(GitHubClient(transport=january_fake()), store, resolved(), today=dt.date(2025, 6, 1))
     assert store.candidate_count() == 3
+
+
+def dual_licensed(**over: Any) -> ResolvedRepo:
+    return resolved().model_copy(update={"license": "MIT OR Apache-2.0", **over})
+
+
+def test_dual_licensed_repos_pass_when_the_github_id_is_configured() -> None:
+    """GitHub reports dual-licensed repos as NOASSERTION (verified for hynek/structlog)."""
+    client = GitHubClient(transport=FakeGitHub({}, repo_response("NOASSERTION")))
+    repo = dual_licensed(github_license_id="NOASSERTION")
+    assert check_repo(client, repo).license_spdx == "NOASSERTION"
+
+
+def test_a_dual_licensed_repo_without_the_github_id_is_refused_which_is_why_the_field_exists() -> (
+    None
+):
+    client = GitHubClient(transport=FakeGitHub({}, repo_response("NOASSERTION")))
+    with pytest.raises(ConfigMismatchError, match="NOASSERTION"):
+        check_repo(client, dual_licensed())
+
+
+def test_a_configured_github_id_is_still_checked() -> None:
+    client = GitHubClient(transport=FakeGitHub({}, repo_response("MIT")))
+    with pytest.raises(
+        ConfigMismatchError, match=r"expects GitHub to report license 'NOASSERTION'"
+    ):
+        check_repo(client, dual_licensed(github_license_id="NOASSERTION"))

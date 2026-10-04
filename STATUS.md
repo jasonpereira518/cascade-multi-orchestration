@@ -73,10 +73,51 @@ Docker, or any prompt quality.
 and is the only place a pipeline attrition table belongs. Until that runs there is no table.
 <!-- attrition:pallets/click:end -->
 
+## Repos added at the human's request (jinja, attrs, structlog, marshmallow)
+
+All four are in `configs/repos.yaml`. Each was built and run for real; none has been mined, because
+there is still no `GITHUB_TOKEN`. `make check`: 466 passed, 1 skipped.
+
+| Repo | License | Suite in the image (offline) | Real PRs validated in Docker | Issue-linked and passes my filters, 12 months to 2026-10-04 | Prior 12 months |
+|---|---|---|---|---:|---:|
+| pallets/click | BSD-3-Clause | 2241 tests, ~4 s | 1 of 1 (+6 of 6 native) | 32 | 23 |
+| marshmallow-code/marshmallow | MIT | 1190 tests, ~1.5 s | 3 of 3 | 9 | 0 |
+| hynek/structlog | MIT OR Apache-2.0 | 884 tests, ~1.4 s | 3 of 3 | 7 | 10 |
+| python-attrs/attrs | MIT | 1401 tests, ~6 s | 2 of 2 | 4 | 11 |
+| pallets/jinja | BSD-3-Clause | 911 tests, ~2 s | n/a | **0 (dormant)** | 0 |
+| **Total** |  |  |  | **52** | **44** |
+
+Method and limits (exploratory, not a pipeline result): the counts are PRs that pass my
+git-checkable filters (source and test files, size limits, not docs, dependency, or branch-sync)
+**and** that GitHub's `linked:issue` search says are linked to an issue. They are upper bounds: the
+single-closing-issue, same-repo, non-empty-body, env-build, and validation rules are not applied, and
+`linked:issue` is close to but not exactly `closingIssuesReferences`. Details: `DECISIONS.md` 48-53.
+
+Findings worth knowing:
+- **Jinja is dormant** (last commit to `main` 2025-06-14): no tasks; skip it.
+- **GitHub reports structlog's license as `NOASSERTION`**, which would have failed the mine-time
+  license check; fixed with the new optional `github_license_id`.
+- Marshmallow's default branch is `dev`; the pipeline reads it from the API, so this just works.
+- Click's issue-linked count (73) is far above the old commit-message proxy (18).
+
+## Projected tasks (an upper-bound bracket, not a measurement)
+
+Across the four live repos, **about 52 candidates for the latest 12 months and 44 for the year
+before** (table above), before the single-issue, env-build, and validation rules. Real validation
+attrition looked small (15 of 15 real PRs validated across click and the three new repos), but those
+were taken from the passing set, not drawn at random, so that is weak evidence. If 70 to 90 percent
+survive, one 12-month window gives roughly **35 to 45 tasks**, which is right at Tier 1's 40+ target.
+A window of 18 months or more (if your arms' knowledge cutoffs allow it) gives comfortable margin.
+Click supplies most of it (32 of 52), so any click-specific problem matters a lot.
+
 ## Spend
 
 **$0.** No real provider call has ever been made, by this phase or any earlier one. Costs in tests
 and in the exploratory run are scripted token counts priced with synthetic prices.
+
+GitHub access this round: read-only search queries on public repositories through the connected
+GitHub MCP tool (merged PRs linked to issues, repository license). No writes, nothing opened or
+commented, and no token handled by me. The pipeline itself still reads only `GITHUB_TOKEN`.
 
 ## Risks and unverified items
 

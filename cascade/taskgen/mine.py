@@ -56,13 +56,17 @@ def search_string(repo: str, start: dt.date, end: dt.date) -> str:
 
 
 def check_repo(client: GitHubClient, repo: ResolvedRepo) -> RepoMeta:
-    """Fetch repo metadata and fail if the configured license does not match GitHub's."""
+    """Fetch repo metadata and fail if the configured license does not match GitHub's.
+
+    Dual-licensed repos set ``github_license_id`` (GitHub reports NOASSERTION for them).
+    """
     owner, name = repo.name.split("/", 1)
     meta = parse_repo(client.query(REPO_QUERY, {"owner": owner, "name": name}))
-    if meta.license_spdx != repo.license:
+    expected = repo.github_license_id or repo.license
+    if meta.license_spdx != expected:
         raise ConfigMismatchError(
-            f"{repo.name}: repos.yaml says license {repo.license!r}, "
-            f"GitHub reports {meta.license_spdx!r}"
+            f"{repo.name}: repos.yaml expects GitHub to report license {expected!r}, "
+            f"but it reports {meta.license_spdx!r}"
         )
     if not meta.default_branch:
         raise GitHubError(f"{repo.name}: GitHub reported no default branch")

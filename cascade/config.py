@@ -194,6 +194,9 @@ class RepoSpec(_Strict):
     test_cmd: str | Todo
     # Debian packages the tests need that the slim base image lacks (e.g. `less` for pager tests).
     system_packages: list[str] = Field(default_factory=list)
+    # What GitHub's API reports as the license id, when it differs from ``license``. Dual-licensed
+    # repos are reported as NOASSERTION, which would otherwise fail the license check at mine time.
+    github_license_id: str | None = None
     notes: str = ""
 
 
@@ -206,6 +209,7 @@ class ResolvedRepo(_Strict):
     install_cmd: str
     test_cmd: str
     system_packages: tuple[str, ...] = ()
+    github_license_id: str | None = None
     window_start: dt.date
     window_end: dt.date
     limits: SelectionLimits
@@ -246,6 +250,7 @@ class ReposConfig(_Strict):
             install_cmd=spec.install_cmd,
             test_cmd=spec.test_cmd,
             system_packages=tuple(spec.system_packages),
+            github_license_id=spec.github_license_id,
             window_start=start,
             window_end=end,
             limits=self.limits,

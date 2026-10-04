@@ -195,3 +195,33 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
     plumbing; see STATUS.md.
 47. **E501 is relaxed for `tests/` only** (long ids and literals read better unwrapped); production
     code stays at 100 columns.
+
+## Additional repos (human's picks: jinja, attrs, structlog, marshmallow)
+
+48. **All four were built and run for real before being listed.** Each image was built through the
+    real `build_image`, and the suite was run three times offline with the network off. Results:
+    jinja 911 tests, attrs 1401, structlog 884, marshmallow 1190; all passing, 1.4 to 6 s. Eight real
+    issue-linked PRs from attrs, structlog, and marshmallow were then validated end to end in Docker
+    (3x pre/post): 8 of 8 validated. Jinja was not validated per PR because it yields none (49).
+49. **Jinja is dormant and is listed only for completeness.** Its last commit to `main` is
+    2025-06-14, so it has no PR landings in the last 16 months and fails the spec's "active"
+    criterion. Config is verified but the run instructions skip it.
+50. **`github_license_id` for dual-licensed repos.** GitHub's API reports structlog (MIT OR Apache-2.0)
+    as `NOASSERTION` (verified), so the mine-time license check would have rejected it. The optional
+    field says what GitHub should report; the check still runs and still fails on any other value.
+51. **Yield estimates now combine two independent sources.** PRs that pass my git-checkable filters
+    (source and test files, size limits, not docs/dependency/branch-sync) are intersected with GitHub's
+    own `linked:issue` search, run through the GitHub MCP tool as read-only queries on public
+    repos. This replaced the commit-message proxy, which badly underestimated (click: 18 by proxy,
+    73 linked per GitHub). The pipeline itself still reads only `GITHUB_TOKEN`; the MCP queries were
+    exploratory. `linked:issue` is not exactly `closingIssuesReferences`, and the single-issue,
+    same-repo, and non-empty-body rules are not applied, so the counts are upper bounds.
+52. **Per-repo test commands.** attrs runs serially: its tox config uses `-n auto` (xdist), but
+    parallel workers would race on the plugin's single report file. structlog runs with
+    `-p no:randomly`: its test group includes pytest-randomly, and a fixed order keeps the 3x flake
+    check meaningful. Tests whose parametrize ids embed the current time (six in marshmallow) have
+    node ids that differ per run, so the flake check drops them, which is the conservative outcome.
+53. **Large fail_to_pass sets mean an import failure, not a big fix.** When a PR's test module cannot
+    import before the fix (structlog #761, #812: ~175 tests), every test in it counts as
+    fail_to_pass by the "missing before" rule. Grading is equivalent, but those tasks are worth a
+    glance during audit, since their F2P size says nothing about difficulty.

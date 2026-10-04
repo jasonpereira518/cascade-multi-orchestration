@@ -12,13 +12,15 @@ Unchanged from before. In short: a GitHub token, the date window, Docker running
 ```bash
 export GITHUB_TOKEN=<fine-grained token, public repositories read-only>
 # edit configs/repos.yaml: set date_window.start and date_window.end (YYYY-MM-DD)
-uv run cascade taskgen run --repo pallets/click --stop-after patch   # token only, no Docker
-uv run cascade taskgen run --repo pallets/click                      # builds the image, validates
-grep -c . tasks/manifest.jsonl                                       # how many tasks you got
+
+REPOS="pallets/click python-attrs/attrs hynek/structlog marshmallow-code/marshmallow"   # not jinja: dormant
+for R in $REPOS; do uv run cascade taskgen run --repo "$R" --stop-after patch; done   # token only, no Docker
+for R in $REPOS; do uv run cascade taskgen run --repo "$R"; done                      # builds images, validates
+grep -c . tasks/manifest.jsonl                                                       # how many tasks you got
 ```
 
-If you get fewer than 5, run on what you have. `cascade taskgen attrition --repo pallets/click` shows
-where the others dropped. Choose the date window after you know your model's knowledge cutoff
+If you get fewer than 5, run on what you have. `cascade taskgen attrition --repo <owner/name>` shows
+where each repo's candidates dropped. Choose the date window after you know your model's knowledge cutoff
 (part 2), because the window must start after it.
 
 ## Part 2. Configure exactly one cheap arm
@@ -136,8 +138,9 @@ This is the first contact with the real API, so some friction is likely and is t
 
 1. **The cheap arm:** which model and effort (part 2).
 2. **Budget numbers** (part 3), if my suggestions are not right for you.
-3. **Part 1 still open:** token choice and date window. More repos are still needed for Tier 1
-   (STOP A): do you want a shortlist?
+3. **Part 1 still open:** token choice and date window. Your four extra repos are configured (jinja is
+   dormant, so skip it). Over 12 months they bracket about 52 candidates; for Tier 1's 40+ a window of
+   18 months or more gives margin, if your model's knowledge cutoff allows it.
 4. After seeing the paid results: do you want me to proceed to the 3-arm matrix, or tune prompts first?
    I will recommend based on what the failures look like.
 5. Approval for the Phase 3 scope when you are ready: per-role ablations and the policy code
