@@ -272,3 +272,16 @@ def test_every_planted_leak_into_a_real_prompt_would_be_caught(attempt_env: Atte
     assert isinstance(plans["patcher"][0], ModelStep)
     report = attempt_env.run(plans)
     assert any("test patch" in v for v in report.leak_violations)
+
+
+def test_the_trace_audit_finds_a_patch_hidden_inside_several_layers_of_json(
+    attempt_env: AttemptEnv,
+) -> None:
+    """A model can wrap content in JSON inside JSON inside the trace record's own JSON."""
+    task = attempt_env.task
+    wrapped = json.dumps({"payload": json.dumps({"p": task.test_patch.strip()})})
+    line = json.dumps({"kind": "llm", "role": "patcher", "input": wrapped})
+    assert any("test patch" in v for v in audit_trace(line, task))
+    # And the unwrapped control is clean, so the hit above is caused by the nesting handling.
+    clean = json.dumps({"kind": "llm", "role": "patcher", "input": json.dumps({"p": "nothing"})})
+    assert audit_trace(clean, task) == []

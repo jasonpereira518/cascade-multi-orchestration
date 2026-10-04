@@ -118,3 +118,80 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
     shares every isolation flag via `ContainerRunner` and differs only in what it will mount: it
     skips the leak guard because validation workspaces legitimately contain the patches. A test
     asserts the two produce identical commands for a clean workspace.
+
+## Phase 2: agent pipeline and walking skeleton (STOP B)
+
+29. **Agents SDK integration is a model-layer wrapper, and it replaced the Phase 0 provider layer.**
+    The SDK drives the agent loop (tools, structured output, turns); `MeteredModel` wraps any SDK
+    `Model` and runs ledger authorize -> call -> record around every call, so no role, and no turn of
+    a tool loop, can bypass the caps. The old `Provider`/`MockProvider`/`MeteredClient` layer only
+    did single completions and would have duplicated the SDK, so it was removed rather than kept
+    in parallel. Its guarantees (spend gate, kill switch, caps, error rows) moved to
+    `harness/models.py` with ported tests.
+30. **SDK facts verified against openai-agents 0.23.1 / openai 3.24.0 (rule 8), by reading source
+    and prototyping:** strict tool schemas make every parameter required and drop defaults, so tools
+    take no defaults; `output_tokens` includes reasoning tokens (subtracted for the ledger); usage
+    details need `cache_write_tokens` (new in openai 3.x); exceptions raised in the model layer reach
+    the caller unwrapped (so budget and kill-switch errors are catchable); `MaxTurnsExceeded` and
+    `ModelBehaviorError` are catchable. `ModelSettings.max_tokens`, `reasoning`, `store` exist.
+31. **SDK tracing is off on every run, and `store=False`.** Default tracing uploads prompts to a
+    third-party backend, and the Responses API retains responses server-side by default. Local JSONL
+    traces replace the first; the second is just disabled.
+32. **Cached input tokens are billed as ordinary input.** models.yaml has no cached-token price, so
+    cost can only be overstated. Failed calls are logged as zero-cost error rows; if a provider
+    bills a failed request, the ledger would undercount it (unverified; watch the first paid run).
+33. **The mock is the SDK's own `ScriptedModel`, one instance per role,** so a plan can span repair
+    rounds. With no plan it answers any output schema with a minimal valid instance and calls no
+    tools, which makes `cascade run` work offline and fail honestly (empty patch).
+34. **The graded patch is source-only: every non-test file the agent changed.** Test files, including
+    the reproducer, are excluded because hidden tests are applied on top and edits to tests would
+    conflict. Patches are built with `git diff --no-index --no-prefix` on filtered copies and
+    header-normalized. Both `--no-prefix` and the normalization were found by tests: plain
+    `--no-index a b` emits `a/a/<path>` (inapplicable) and `b/x b/x` headers for added files.
+35. **verifier_claimed definition:** reproducer fails before the patch and passes after, AND no test of
+    the visible suite regresses. A regression must reproduce on a second run before it counts (one
+    flaky test cannot turn a good patch into a "failure"). An empty patch is never claimed and runs no
+    suite. With the Reproducer disabled the first condition is dropped, a weaker claim that shows up
+    as such in the pipeline config of the matrix row.
+36. **The pipeline verifies the reproducer itself.** After the Reproducer role it runs the file on the
+    untouched code and requires a genuine `failed` test (an import or collection error does not
+    count). The agent's own statement that it fails is not trusted.
+37. **Review happens only after the Verifier is satisfied, and only drives repair.** A reviewer that
+    cannot answer does not block a verified patch. Repairs are bounded by `max_repairs`.
+38. **Failure semantics.** Cap or kill switch: stop calling models, but still diff the workspace and
+    run the Verifier (no LLM) so the row is honest rather than empty. Role-level model failures
+    (`AgentsException`, `openai.OpenAIError`) are survivable. The spend gate and genuine bugs
+    propagate, so a config mistake or a bug is never recorded as an attempt result.
+39. **true_success grading** applies the agent's source patch to a fresh base export, then the hidden
+    test patch, runs the full suite once under the grading runner, and requires every fail_to_pass
+    and pass_to_pass test to pass. No grading information flows back into any prompt.
+40. **Attempt bookkeeping.** attempt_id = arm|seed|config id (+ `|tryN` for retries, which get a
+    fresh per-attempt cap while task and global totals stay cumulative). The matrix row is written
+    last and keyed by (task, arm, seed, config id), so ablations of the same attempt are separate
+    rows and an interrupted attempt leaves none. `wall_s` is the agent pipeline's wall time, not
+    grading. Every numeric field is a sum over logged ledger calls.
+41. **Tools are pure Python and bounded:** BM25 over 40-line chunks plus regex grep (no ripgrep: no
+    external dependency, fully deterministic), line and character caps, no default parameters,
+    dotfiles and `.git` unreachable, symlinks resolving outside the root refused.
+42. **The leak audit decodes nested JSON and exempts one check.** Trace lines nest JSON several
+    levels, so strings are decoded recursively rather than guessing escape levels (a bug found by a
+    planted-leak test). Hidden test *names* are those the test patch adds, not existing visible ids
+    (agents legitimately see those in test output). The whole-gold-patch check is skipped only on
+    reviewer calls, whose prompt is the agent's own patch; a one-line fix can equal the gold patch
+    byte for byte. A hit means "investigate".
+43. **`NativeExecutor` exists only in tests.** It runs pytest on the host so the pipeline can be tested
+    without Docker, but it still calls the real runner's `validate` so the leak guard runs. The CLI
+    only ever wires the Docker executor.
+44. **Docker was verified for real this phase.** The sandbox test passes against a daemon (the first
+    version asserted "only lo" and was wrong: `--network none` still lists inert tunnel stubs; the
+    check is now "no route"). The click image builds and runs the suite offline. The first run showed
+    24 pager-test failures because the slim base image lacks `less`, hence per-repo `system_packages`.
+45. **The real OpenAI path has never been called.** The source builds `OpenAIResponsesModel` (verified
+    to construct with no network) but no request has been made; there is no key and no spend
+    approval. Likely first-run issues are listed in NEXT.md.
+46. **The Phase 2 acceptance ran on the synthetic fixture task,** because no validated task exists
+    (the Phase 1 live run is still pending a token). A separate exploratory run of the real CLI
+    through real Docker on a real click PR (scratch task, placeholder issue text) confirmed the
+    plumbing; see STATUS.md.
+47. **E501 is relaxed for `tests/` only** (long ids and literals read better unwrapped); production
+    code stays at 100 columns.

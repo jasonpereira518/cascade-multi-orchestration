@@ -16,6 +16,9 @@ uv sync
 make check   # ruff, pyright, pytest
 make smoke   # end-to-end on the synthetic fixture with the mock provider ($0)
 uv run cascade config-status   # list config fields you still need to fill
+uv run cascade taskgen run --repo pallets/click   # build tasks (needs GITHUB_TOKEN and Docker)
+uv run cascade run --task <id> --arm <model@effort>   # one attempt; mock provider by default
+uv run cascade ledger-summary  # calls, tokens, cost, and outcomes per attempt
 ```
 
 The default provider is `mock`. Real spend requires `CASCADE_ALLOW_SPEND=1` and a filled

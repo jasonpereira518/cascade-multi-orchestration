@@ -324,3 +324,27 @@ def test_pipeline_config_validation_and_id() -> None:
 def test_source_protocol_is_the_modelsource_abstraction() -> None:
     assert issubclass(MockModelSource, ModelSource) and sdk_usage(1, 1).requests == 1
     assert FIXED.strip().startswith("if value > high")
+
+
+MIXED_REPRO = (
+    "import pytest\n"
+    "from tinylib import clamp\n\n\n"
+    "@pytest.fixture\n"
+    "def broken():\n"
+    "    raise RuntimeError('fixture exploded')\n\n\n"
+    "def test_repro_fails_for_the_right_reason():\n"
+    "    assert clamp(99, 0, 10) == 10\n\n\n"
+    "def test_repro_errors_in_setup(broken):\n"
+    "    pass\n"
+)
+
+
+def test_a_reproducer_with_one_good_failure_and_one_error_is_still_not_trusted(
+    attempt_env: AttemptEnv,
+) -> None:
+    """A genuine failing test next to a broken one is not a clean reproduction."""
+    plans = good_plans()
+    plans["reproducer"] = repro_steps(MIXED_REPRO)
+    out, _ = run_pipeline(attempt_env, attempt_env.source(plans))
+    assert not out.repro_valid and not out.claimed
+    assert next(s for s in out.stages if s.stage == "repro_check").ok is False
