@@ -309,8 +309,11 @@ def test_real_container_has_no_network_no_git_and_read_only_root(
 ) -> None:
     image = _docker_image()
     assert image is not None
+    # With --network none the kernel still lists inert tunnel stubs next to `lo`; what matters is
+    # that there is no route off the box. (A default-network container shows 2 IPv4 routes.)
     script = (
-        "tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ','; echo;"
+        'echo "routes=$(tail -n +2 /proc/net/route | wc -l | tr -d " ")";'
+        'echo "ifaces=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d " " | tr "\\n" ",")";'
         "ls -A /workspace; touch /workspace/writable && echo workspace-rw;"
         "touch /etc/should-fail 2>/dev/null || echo root-ro"
     )
@@ -318,6 +321,19 @@ def test_real_container_has_no_network_no_git_and_read_only_root(
         SandboxSpec(image=image, workspace=workspace), ["sh", "-c", script]
     )
     lines = result.stdout.splitlines()
-    assert lines[0] == "lo,"  # only loopback: no external interface
+    assert lines[0] == "routes=0", result.stdout + result.stderr
+    ifaces = {i for i in lines[1].removeprefix("ifaces=").split(",") if i}
+    stubs = {
+        "tunl0",
+        "gre0",
+        "gretap0",
+        "erspan0",
+        "ip_vti0",
+        "ip6_vti0",
+        "sit0",
+        "ip6tnl0",
+        "ip6gre0",
+    }
+    assert ifaces - stubs == {"lo"}, ifaces
     assert ".git" not in result.stdout.split()
     assert "workspace-rw" in lines and "root-ro" in lines

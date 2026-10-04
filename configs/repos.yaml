@@ -22,4 +22,7 @@ repos:
     # `tests` dependency group. Editable matters: click's tests call importlib.metadata.
     install_cmd: uv pip install --group tests -e .
     test_cmd: python -m pytest   # pytest picks up click's own config (testpaths, markers)
+    # The slim base image has no `less`; click's pager tests (24 of ~2.2k) fail without it, before
+    # and after every patch. Found by running the suite in the real image on 2026-10-04.
+    system_packages: [less]
     notes: "src/ layout, flit_core backend; ~2.2k tests in ~5s natively (measured 2026-10-04)."

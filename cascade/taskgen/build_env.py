@@ -13,6 +13,7 @@ without a daemon. The real build and real container runs are not exercised by CI
 from __future__ import annotations
 
 import hashlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -61,10 +62,27 @@ def plugin_path() -> Path:
     return path
 
 
+_APT_NAME = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
+
+
+def _apt_step(packages: Sequence[str]) -> str:
+    if not packages:
+        return ""
+    for name in packages:
+        if not _APT_NAME.fullmatch(name):  # the value is spliced into a RUN line
+            raise CascadeError(f"invalid apt package name: {name!r}")
+    joined = " ".join(sorted(packages))
+    return (
+        "RUN apt-get update && apt-get install -y --no-install-recommends "
+        f"{joined} && rm -rf /var/lib/apt/lists/*\n"
+    )
+
+
 def render_dockerfile(repo: ResolvedRepo) -> str:
     py = repo.python_version
     return f"""\
 FROM {BASE_IMAGE}
+{_apt_step(repo.system_packages)}\
 COPY --from=ghcr.io/astral-sh/uv:{UV_VERSION} /uv /uvx /bin/
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \\
     UV_LINK_MODE=copy \\

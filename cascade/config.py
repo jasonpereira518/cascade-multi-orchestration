@@ -192,6 +192,8 @@ class RepoSpec(_Strict):
     python_version: str | Todo
     install_cmd: str | Todo
     test_cmd: str | Todo
+    # Debian packages the tests need that the slim base image lacks (e.g. `less` for pager tests).
+    system_packages: list[str] = Field(default_factory=list)
     notes: str = ""
 
 
@@ -203,6 +205,7 @@ class ResolvedRepo(_Strict):
     python_version: str
     install_cmd: str
     test_cmd: str
+    system_packages: tuple[str, ...] = ()
     window_start: dt.date
     window_end: dt.date
     limits: SelectionLimits
@@ -242,6 +245,7 @@ class ReposConfig(_Strict):
             python_version=spec.python_version,
             install_cmd=spec.install_cmd,
             test_cmd=spec.test_cmd,
+            system_packages=tuple(spec.system_packages),
             window_start=start,
             window_end=end,
             limits=self.limits,

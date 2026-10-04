@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cascade.config import ResolvedRepo, SelectionLimits
+from cascade.errors import CascadeError
 from cascade.harness.grading import GradingRunner
 from cascade.taskgen import build_env as be
 from cascade.taskgen.build_env import (
@@ -60,6 +61,30 @@ def test_dockerfile_pins_python_via_uv_and_installs_editable_then_clears_the_sou
     assert copy_src < install < wipe  # install with the source present, then remove it
     assert (
         f"COPY cascade_pytest_report.py {be.CONTAINER_PLUGIN_DIR}/cascade_pytest_report.py" in text
+    )
+
+
+def test_dockerfile_installs_system_packages_first_and_only_when_requested() -> None:
+    plain = render_dockerfile(repo())
+    assert "apt-get" not in plain
+    with_pkgs = render_dockerfile(repo().model_copy(update={"system_packages": ("less", "git")}))
+    lines = with_pkgs.splitlines()
+    apt = next(i for i, ln in enumerate(lines) if ln.startswith("RUN apt-get update"))
+    assert "install -y --no-install-recommends git less &&" in lines[apt]  # sorted, deterministic
+    assert "rm -rf /var/lib/apt/lists/*" in lines[apt]
+    assert apt < lines.index("RUN uv pip install --group tests -e .")
+
+
+@pytest.mark.parametrize("bad", ["less; rm -rf /", "Less", "a b", "", "-x", "$(id)"])
+def test_system_package_names_are_validated(bad: str) -> None:
+    with pytest.raises(CascadeError, match="invalid apt package name"):
+        render_dockerfile(repo().model_copy(update={"system_packages": (bad,)}))
+
+
+def test_system_packages_change_the_image_tag() -> None:
+    a, b = repo(), repo().model_copy(update={"system_packages": ("less",)})
+    assert image_tag(a, render_dockerfile(a), "c" * 40, "p") != image_tag(
+        b, render_dockerfile(b), "c" * 40, "p"
     )
 
 
