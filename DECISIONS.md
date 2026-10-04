@@ -52,3 +52,69 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
 14. **CI actions are pinned by major tag, not SHA.** Versions were read from the GitHub releases
     API when written (`actions/checkout` v7, `astral-sh/setup-uv` v10). SHA pinning is stricter;
     switch if this repo ever handles anything sensitive in CI. CI sets `CASCADE_ALLOW_SPEND=0`.
+
+## Phase 1: task pipeline for pallets/click (STOP A)
+
+15. **A PR's base commit is its merge commit's first parent; the patch is `git diff P M`.** Checked
+    against click's real history: most PRs land as true merge commits (344 two-parent merges in
+    two years, PR title and `(#N)` in the subject), a few as squash commits, and the many
+    single-parent commits without a PR number are branch commits inside merged PRs, never a PR's
+    `mergeCommit`. First-parent diff is the full PR effect for both shapes. Rebase-merges are not
+    supported and are caught by decision 16.
+16. **Patches are cross-checked against GitHub's per-file list and line counts.** Same file set is
+    not enough: a rebase-merged multi-commit PR whose last commit touches the same files would
+    pass with a partial diff. Mismatches drop the PR (`diff_mismatch`, `diff_counts_mismatch`,
+    which also covers renames). This is stricter than needed in rare overlapping-change cases;
+    that costs a few tasks, never correctness. Found by reading real history, not by tests first.
+17. **Gold patch = every non-test file in the diff, including docs and changelog hunks;** test patch
+    = every test file (SWE-bench-style). Size features count source `.py` files only. Classification
+    order matters: dependency/CI files before docs (`requirements/*.txt` is not documentation), and
+    docs-only is reported before no-tests so it appears as its own exclusion. Both were test-found bugs.
+18. **Filters beyond the spec:** exactly one closing issue, in the same repo, with a non-empty body;
+    PRs into a non-default branch are dropped (stable-branch backports duplicate mainline fixes).
+    The issue text is the issue as it is *now*; edits made after the fix are not detected (an audit
+    item). Click's `closingIssuesReferences` includes manually linked issues (GitHub's default).
+19. **Test outcomes come from a tiny pytest plugin (`docker/cascade_pytest_report.py`), not `-rA`
+    text.** Real `-rA` output omits node ids for skipped tests and parametrized ids contain spaces
+    and " - ", so parsing text is ambiguous. The plugin writes exact ids; a malformed report raises
+    instead of being skipped. It is located relative to the repo root, so `taskgen` runs from a
+    checkout, not an installed wheel.
+20. **The repo is installed editable at image build time, pointing at `/workspace`.** Click's own
+    tests call `importlib.metadata.version("click")`, so `PYTHONPATH` alone fails (found by running
+    its suite natively). The source is deleted from the image afterwards; at test time the task tree
+    is bind-mounted at `/workspace`. Caveat: package metadata (e.g. the version string) comes from
+    the image's reference commit, so a test comparing it to the task tree can fail identically before
+    and after the gold patch; such tests land in neither list.
+21. **Validation semantics.** Two configurations (base+tests, base+tests+gold) x 3 fresh-workspace
+    runs. A test is flaky if its outcome (including "missing") differs between runs of one
+    configuration, and is excluded. fail_to_pass = not passing before (failed, error, or missing, so
+    tests in a module that cannot import yet count) and passing after. pass_to_pass = passing both.
+    A test passing before and failing after gold drops the whole task (`gold_regresses`, strict on
+    purpose). Skipped/xfailed tests belong to neither list. The container timeout equals the runtime
+    cap, and any timeout or over-cap run drops the task. Usable pytest exit codes are 0 and 1.
+22. **Env stage = run the test files the test patch touches, with gold applied, and require that
+    they collect and run.** Cheap and catches missing dependencies per base commit. It is not a
+    full collection run.
+23. **One image per repo, built at the newest passing candidate's base commit** (`uv` 0.11.2 and
+    `debian:bookworm-slim` tags were verified to exist; Python pinned to an exact patch release
+    from `uv python list`). The tag hashes the Dockerfile, reference commit, plugin, and test
+    command, so identical inputs reuse the image. Tasks older than the reference commit run with
+    its dependencies; mismatches show up as env or validation drops, not silently.
+24. **State is SQLite; reruns skip final rows and retry `error` rows.** A month slice is marked done
+    only once wholly in the past, so the slice containing today is refetched. State is bound to a
+    config fingerprint and refuses to mix configurations. Reruns never rebuild an existing image.
+25. **`github.py` carries a local `# pyright: basic`.** It parses untyped external JSON, and every
+    value is validated into pydantic models immediately; strict mode there only adds casts. The rest
+    of `cascade/` stays strict.
+26. **No GITHUB_TOKEN was available, and I did not borrow the `gh` CLI's token.** The brief says to
+    use `GITHUB_TOKEN`; that credential was not provided, and `gh`'s OAuth token has wider scope than
+    a read-only miner needs. The client reads only the env var. CI fixtures are therefore synthetic
+    (labeled, shaped from GitHub's published schema); `GitHubClient(record_dir=...)` captures real
+    responses into `tests/fixtures/recorded/` for later.
+27. **The date window was left `TODO` on purpose.** It must start after the newest arm's knowledge
+    cutoff, which comes from `models.yaml`, which is still unfilled. Repo-specific fields for click
+    (license, Python 3.12.13, install and test commands) were verified and filled.
+28. **A grading runner exists now, separate from the agent runner** (closes the deferral in #9). It
+    shares every isolation flag via `ContainerRunner` and differs only in what it will mount: it
+    skips the leak guard because validation workspaces legitimately contain the patches. A test
+    asserts the two produce identical commands for a clean workspace.

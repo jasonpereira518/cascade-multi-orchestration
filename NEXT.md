@@ -1,76 +1,91 @@
 # Next
 
-Nothing further runs until you complete items 1 to 3. Items 4 and 5 are optional but recommended.
+The pipeline is built and tested but has not run live. Three things from you unblock that, then
+one command does the work. Decisions I need are at the bottom.
 
-## 1. Fill `configs/models.yaml` (required)
+## 1. Give the pipeline a GitHub token (required)
 
-Replace every `TODO` with values from the provider's own docs and pricing page. I did not fill any
-of it, because model names and prices are yours to supply (hard rule 5).
+The brief says to use `GITHUB_TOKEN`. It is not set in the environment I run in, and I did not
+borrow the `gh` CLI's stored token (wider scope than a read-only miner needs). Pick one:
 
-- Per model: `name`, `input_usd_per_mtok`, `output_usd_per_mtok`, `knowledge_cutoff`,
-  `reasoning_efforts`. Set `reasoning_usd_per_mtok` only if reasoning tokens bill differently from
-  output tokens; otherwise leave it `null`.
-- `arms`: Tier 1 needs 3 arms, each a (model, reasoning_effort). The template has
-  small@low, large@low, large@high. Change them if you want a different spread.
-- The newest `knowledge_cutoff` among your arms sets the earliest allowed PR merge date.
-
-## 2. Fill `configs/budget.yaml` (required)
-
-Set four values: `global_cap_usd`, `per_task_cap_usd`, `per_attempt_cap_usd`,
-`per_attempt_max_tokens`. They must satisfy per_attempt <= per_task <= global. Until all four are
-set the ledger refuses to start, so nothing can spend. To halt everything at any time:
+- **Recommended:** create a fine-grained personal access token with *public repositories, read-only*
+  access (no extra permissions), then in the shell you launch from:
 
 ```bash
-touch KILL_SWITCH
+export GITHUB_TOKEN=<paste token>
 ```
 
-## 3. Choose the first repo and fill `configs/repos.yaml` (required)
-
-**Decision for you:** which repo? Criteria from the spec: Python + pytest, permissive license,
-active, mid-popularity, installs without a GPU, test suite under about 2 minutes, and enough merged
-PRs that close issues inside your date window. Also set `date_window.start/end` (start after the
-newest arm cutoff from step 1), plus `license`, `python_version`, `install_cmd`, `test_cmd`.
-
-If you would like a shortlist, say so and I will draft candidates at the next session using
-read-only `gh` queries (the GitHub MCP server failed to connect in this session). You pick one.
-
-Then check what is left (it prints one line per unfilled field and exits 1 until all are filled):
+- Or, if you accept `gh`'s broader OAuth token for this read-only job, your call:
 
 ```bash
-uv run cascade config-status
+export GITHUB_TOKEN=$(gh auth token)
 ```
 
-## 4. Verify the sandbox against a real Docker daemon (recommended)
+Never commit it; `.env.example` lists the variable. The code reads it from the environment only.
 
-This is the one thing I could not verify: no Docker daemon was running. Start Docker Desktop, then
-pick any small local image that has `sh`, `cat`, `ls`, and `touch` (for example `alpine`):
+## 2. Fill the date window (required)
+
+In `configs/repos.yaml` set `date_window.start` and `end` (YYYY-MM-DD). `start` must be after the
+newest arm's knowledge cutoff, which comes from `configs/models.yaml` (still unfilled; that file
+and `budget.yaml` are not needed for this phase, but the cutoffs decide the window).
+
+For scale: over 2025-10-04 to 2026-10-04 an estimate from click's git history found 126
+PR-landing commits, 48 passing the source/test/size rules, and a rough floor of 18 with a closing
+keyword in commit messages. The real closing-issue count comes from GraphQL. See `STATUS.md`.
+
+```bash
+uv run cascade config-status   # repos.yaml: date_window lines should be gone
+```
+
+## 3. Run the token-only stages first (no Docker needed)
+
+This mines, filters, and derives patches, then writes the attrition block into `STATUS.md`. It
+makes GraphQL calls only (read-only) and a public `git clone` of pallets/click.
+
+```bash
+uv run cascade taskgen run --repo pallets/click --stop-after patch
+```
+
+Re-running is safe: finished months and PRs are skipped. If it stops on a rate limit it says when
+it resets; just rerun.
+
+## 4. Start Docker, verify the sandbox, run everything
+
+Start Docker Desktop, then check the sandbox flags against a real daemon (this has never run):
 
 ```bash
 docker pull alpine:3
 CASCADE_TEST_DOCKER_IMAGE=alpine:3 make docker-test
 ```
 
-It asserts: only the loopback interface exists (network off), no `.git` in the workspace, the
-workspace is writable, and the root filesystem is read-only. Tell me if it fails and paste the
-output; the flags are the likely culprit.
+Then the full pipeline: build the click image, smoke-run each PR's tests, validate (3 runs before
+and after the gold patch), and write passing tasks to `tasks/manifest.jsonl`:
 
-## 5. Optional housekeeping
+```bash
+uv run cascade taskgen run --repo pallets/click
+uv run cascade taskgen attrition --repo pallets/click --status-md STATUS.md
+```
 
-- Create a GitHub remote if you want CI to run (`gh repo create`, then push). I have not pushed
-  or created anything remote.
-- Provide `GITHUB_TOKEN` (read-only, public repos) in a local `.env` for task mining. Never commit
-  it; `.env.example` shows the variable names.
+The first image build downloads Python and click's test dependencies and can take a few minutes.
+If the build or a test run fails, send me the error text; the Dockerfile is the likeliest culprit
+(`STATUS.md` risk 1).
 
 ## Decisions I need from you
 
-1. First repo (item 3).
-2. Budget numbers (item 2). For orientation only: the worst-case pre-call check is deliberately
-   pessimistic, so caps that are too tight will refuse calls that would have fit.
-3. Confirm the next stage may add and pin the OpenAI Agents SDK and OpenAI SDK as dependencies. I
-   will check their APIs against the installed versions before using them.
+1. **More repos.** Click alone will not reach Tier 1's 40+ audited tasks (expect roughly 5-20 per
+   click-sized repo per year of window). Do you want me to shortlist 3-6 more candidates (Python +
+   pytest, permissive license, active, comparable size) using read-only `gh` queries? You pick.
+2. **Token choice** (item 1): fine-grained PAT, or `gh`'s token?
+3. **Date window** (item 2), and the arm knowledge cutoffs behind it.
+4. **Yield levers, only if the live numbers disappoint.** Raising the size limits would gain almost
+   nothing (they drop 1-4 PRs a year). The real levers are a longer window (bounded by cutoffs),
+   more repos, or relaxing the closing-issue rule (for example using the PR description as the
+   issue text). I recommend against the last one: it changes what an "issue" is and weakens the
+   benchmark. I will not do it unless you ask.
+5. Still open from before: budget numbers, and approval to add the OpenAI Agents SDK as a dependency
+   in the agent phase.
 
-## What happens next (after steps 1 to 3)
+## After the live run (STOP B)
 
-STOP 2 is the $0 task pipeline for the first repo: mining via GraphQL, filtering, per-repo image
-build, validation (3 runs, flake removal, runtime cap, attrition per stage), the frozen split, and
-an audit sheet for you to review. No LLM calls and no spend. Only audited-ok tasks go forward.
+Frozen train/test split by hash and by repo, the audit sheet for you to review (only audited-ok
+tasks enter experiments), and the real task count against the 40+ target.
