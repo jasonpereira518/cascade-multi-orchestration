@@ -23,9 +23,8 @@ from pathlib import Path
 
 from cascade.config import ResolvedRepo
 from cascade.errors import CascadeError
-from cascade.harness.grading import GradingRunner
-from cascade.harness.sandbox import RunFn, SandboxSpec, prepare_workspace
-from cascade.taskgen.results import RunResult, parse_report
+from cascade.harness.sandbox import ContainerRunner, RunFn, SandboxSpec, prepare_workspace
+from cascade.taskgen.results import RunResult, parse_report_full
 
 # Infrastructure pins (not model names or prices). Verified to exist when written: the uv image
 # tag on ghcr.io and the Debian tag on Docker Hub. Changing either changes the image tag.
@@ -151,7 +150,7 @@ def build_image(
 class DockerTestExecutor:
     """Runs pytest for one workspace inside the task image and returns per-test outcomes."""
 
-    def __init__(self, image: str, runner: GradingRunner, test_cmd: str) -> None:
+    def __init__(self, image: str, runner: ContainerRunner, test_cmd: str) -> None:
         self._image = image
         self._runner = runner
         self._test_cmd = shlex.split(test_cmd)
@@ -179,8 +178,9 @@ class DockerTestExecutor:
         result = self._runner.run(spec, argv)
         tail = (result.stdout + result.stderr)[-1500:]
         outcomes: dict[str, str] = {}
+        details: dict[str, str] = {}
         if not result.timed_out and report.is_file():
-            outcomes = parse_report(report.read_text(encoding="utf-8"))
+            outcomes, details = parse_report_full(report.read_text(encoding="utf-8"))
         report.unlink(missing_ok=True)
         return RunResult(
             exit_code=result.exit_code,
@@ -188,6 +188,7 @@ class DockerTestExecutor:
             timed_out=result.timed_out,
             outcomes=outcomes,
             stdout_tail=tail,
+            details=details,
         )
 
 

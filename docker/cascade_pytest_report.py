@@ -4,7 +4,8 @@ Why a plugin and not `-rA` output: short-summary lines drop skipped node ids, an
 can contain spaces and " - ", so splitting them back out of text is ambiguous. This writes exact
 node ids and outcomes to the file named by $CASCADE_REPORT_PATH.
 
-Line format: {"nodeid": str, "when": "setup|call|teardown|collect", "outcome": str}
+Line format: {"nodeid": str, "when": "setup|call|teardown|collect", "outcome": str,
+"detail": str (optional, failures only: the last part of pytest's failure text)}
 Outcomes: passed, failed, skipped, xfailed, xpassed. Setup/teardown phases are written only when
 they did not pass, so a passing test produces exactly one line (its call phase).
 """
@@ -20,12 +21,18 @@ def _path() -> str | None:
     return os.environ.get("CASCADE_REPORT_PATH")
 
 
-def _emit(nodeid: str, when: str, outcome: str) -> None:
+_DETAIL_CHARS = 1500
+
+
+def _emit(nodeid: str, when: str, outcome: str, detail: str = "") -> None:
     path = _path()
     if path is None:
         return
+    row = {"nodeid": nodeid, "when": when, "outcome": outcome}
+    if detail:
+        row["detail"] = detail[-_DETAIL_CHARS:]
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"nodeid": nodeid, "when": when, "outcome": outcome}) + "\n")
+        f.write(json.dumps(row) + "\n")
 
 
 def pytest_configure(config: Any) -> None:
@@ -43,9 +50,10 @@ def pytest_runtest_logreport(report: Any) -> None:
     else:
         outcome = "xpassed" if wasxfail else "passed"
     if report.when == "call" or outcome != "passed":
-        _emit(report.nodeid, report.when, outcome)
+        detail = report.longreprtext if outcome == "failed" else ""
+        _emit(report.nodeid, report.when, outcome, detail)
 
 
 def pytest_collectreport(report: Any) -> None:
     if report.failed:
-        _emit(report.nodeid, "collect", "failed")
+        _emit(report.nodeid, "collect", "failed", report.longreprtext)

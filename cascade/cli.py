@@ -8,10 +8,20 @@ from typing import Annotated
 
 import typer
 
+from cascade.agents import runner as agent_runner
+from cascade.agents.pipeline import PipelineConfig
 from cascade.config import load_budget, load_models, load_repos
 from cascade.errors import CascadeError
+from cascade.harness.ledger import Ledger, summarize
+from cascade.harness.providers import resolve_provider_name
+from cascade.harness.providers.base import ModelSource
+from cascade.harness.providers.mock import MockModelSource
+from cascade.harness.providers.openai import OpenAIModelSource
+from cascade.routing.matrix import MatrixStore
 from cascade.taskgen import attrition
+from cascade.taskgen.build_env import DockerUnavailableError, docker_available
 from cascade.taskgen.pipeline import STAGE_ORDER, run_pipeline
+from cascade.taskgen.schema import Task
 from cascade.taskgen.store import StageStore
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Cascade CLI.")
@@ -116,3 +126,163 @@ def taskgen_attrition(
             attrition.update_status_md(status_md, resolved.name, block)
     finally:
         store.close()
+
+
+def _fail(message: str) -> typer.Exit:
+    typer.echo(f"error: {message}", err=True)
+    return typer.Exit(2)
+
+
+def _load_task(manifest: Path, task_id: str) -> Task:
+    if not manifest.exists():
+        raise _fail(f"no manifest at {manifest}; build tasks first (cascade taskgen run)")
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            task = Task.model_validate_json(line)
+            if task.task_id == task_id:
+                return task
+    raise _fail(f"task {task_id!r} is not in {manifest}")
+
+
+def _make_source(provider: str) -> ModelSource:
+    if provider == "mock":
+        return MockModelSource()
+    if provider == "openai":
+        return OpenAIModelSource()  # refuses unless CASCADE_ALLOW_SPEND=1 and OPENAI_API_KEY is set
+    raise _fail(f"unknown provider {provider!r}; expected 'mock' or 'openai'")
+
+
+@app.command("run")
+def run_command(
+    task: Annotated[str, typer.Option("--task", help="Task id from the manifest.")],
+    arm: Annotated[str, typer.Option("--arm", help="Arm id, e.g. model@effort (see models.yaml).")],
+    seed: Annotated[int, typer.Option(help="Attempt seed (part of the matrix key).")] = 0,
+    reproducer: Annotated[bool, typer.Option(help="Enable the Reproducer role.")] = True,
+    reviewer: Annotated[bool, typer.Option(help="Enable the Reviewer role.")] = True,
+    max_repairs: Annotated[int, typer.Option(help="Extra Patcher rounds after the first.")] = 2,
+    max_output_tokens: Annotated[
+        int, typer.Option(help="Per model call, reasoning included.")
+    ] = 4096,
+    cap_usd: Annotated[
+        float | None, typer.Option(help="Per-attempt dollar cap; never above budget.yaml's.")
+    ] = None,
+    provider: Annotated[
+        str | None, typer.Option(help="mock (default) or openai. $CASCADE_PROVIDER also works.")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option(help="Rerun even if the matrix already has this row.")
+    ] = False,
+    configs_dir: _ConfigsDir = Path("configs"),
+    manifest: Annotated[Path, typer.Option(help="Task manifest.")] = Path("tasks/manifest.jsonl"),
+    runs_dir: Annotated[Path, typer.Option(help="Ledger, matrix, attempts, traces.")] = Path(
+        "runs"
+    ),
+    taskgen_runs_dir: _RunsDir = Path("runs/taskgen"),
+) -> None:
+    """Run one attempt of one arm on one task and record both outcomes. Real spend needs
+    --provider openai AND CASCADE_ALLOW_SPEND=1."""
+    try:
+        models = load_models(configs_dir / "models.yaml")
+        arm_spec = next((a for a in models.arms if a.arm_id == arm), None)
+        if arm_spec is None:
+            known = ", ".join(a.arm_id for a in models.arms)
+            raise _fail(f"unknown arm {arm!r}; models.yaml defines: {known}")
+        budget = load_budget(configs_dir / "budget.yaml").resolve()
+        if cap_usd is not None:
+            budget = budget.model_copy(
+                update={"per_attempt_cap_usd": min(cap_usd, budget.per_attempt_cap_usd)}
+            )
+        provider_name = resolve_provider_name(provider)
+        if provider_name == "openai" and models.model_spec(arm_spec.model).provider != "openai":
+            raise _fail(f"model {arm_spec.model!r} is not an openai model in models.yaml")
+        source = _make_source(provider_name)
+        task_obj = _load_task(manifest, task)
+        repos = load_repos(configs_dir / "repos.yaml")
+        repo_spec = next((r for r in repos.repos if r.name == task_obj.repo), None)
+        if repo_spec is None or repo_spec.test_cmd.startswith("TODO"):
+            raise _fail(f"repos.yaml has no filled entry for {task_obj.repo}")
+        clone = taskgen_runs_dir / task_obj.repo.replace("/", "__") / "clone.git"
+        if not clone.exists():
+            raise _fail(f"no clone at {clone}; run `cascade taskgen run` for {task_obj.repo} first")
+        if not docker_available():
+            raise DockerUnavailableError("the docker daemon is not reachable; start Docker")
+        ledger = Ledger(runs_dir / "ledger.sqlite", budget=budget, models=models)
+        matrix = MatrixStore(runs_dir / "matrix.sqlite")
+        try:
+            report = agent_runner.run_attempt(
+                task=task_obj, arm=arm_spec, seed=seed,
+                config=PipelineConfig(
+                    reproducer=reproducer, reviewer=reviewer, max_repairs=max_repairs,
+                    max_output_tokens=max_output_tokens,
+                    test_timeout_s=float(repos.limits.max_test_runtime_s),
+                ),
+                ledger=ledger, matrix=matrix, source=source, clone=clone, runs_dir=runs_dir,
+                executor_factory=agent_runner.docker_executor_factory(task_obj, repo_spec.test_cmd),
+                forbidden_host_paths=[manifest.resolve().parent, taskgen_runs_dir.resolve()],
+                grading_timeout_s=float(repos.limits.max_test_runtime_s), force=force,
+            )  # fmt: skip
+            total_spent = ledger.spent_usd()
+        finally:
+            ledger.close()
+            matrix.close()
+    except CascadeError as e:
+        raise _fail(str(e)) from e
+
+    row = report.row
+    reused = " | (existing row reused; use --force to rerun)" if report.reused else ""
+    typer.echo(f"task {row.task_id} | arm {row.arm_id} | seed {row.seed}{reused}")
+    typer.echo(f"true_success={row.true_success}  verifier_claimed={row.verifier_claimed}")
+    tokens = f"{row.input_tokens}/{row.output_tokens}/{row.reasoning_tokens}"
+    typer.echo(
+        f"cost ${row.cost_usd:.4f}  calls {row.turns}  wall {row.wall_s:.1f}s  "
+        f"tokens in/out/reasoning {tokens}"
+    )
+    if row.error:
+        typer.echo(f"attempt ended early: {row.error}")
+    if report.grade is not None and not report.grade.true_success:
+        typer.echo(f"grading: {report.grade.reason}")
+    for violation in report.leak_violations:
+        typer.echo(f"LEAK AUDIT: {violation}", err=True)
+    if report.attempt_dir is not None:
+        typer.echo(f"artifacts: {report.attempt_dir}")
+    typer.echo(f"ledger total spent so far: ${total_spent:.4f}")
+
+
+@app.command("ledger-summary")
+def ledger_summary_command(
+    runs_dir: Annotated[
+        Path, typer.Option(help="Where ledger.sqlite and matrix.sqlite live.")
+    ] = Path("runs"),
+) -> None:
+    """Summarize logged calls and attempt outcomes. Paste this back after a paid run."""
+    db = runs_dir / "ledger.sqlite"
+    if not db.exists():
+        raise _fail(f"no ledger at {db}")
+    s = summarize(db)
+    typer.echo("LEDGER SUMMARY")
+    typer.echo(f"calls: {s.calls} (errors: {s.errors})  total cost: ${s.cost_usd:.4f}")
+    typer.echo(
+        f"tokens: input {s.input_tokens}, output {s.output_tokens}, reasoning {s.reasoning_tokens}"
+    )
+    typer.echo("by arm:")
+    for arm_id, calls, cost in s.by_arm:
+        typer.echo(f"  {arm_id}: {calls} calls, ${cost:.4f}")
+    typer.echo("by role:")
+    for role, calls, cost in s.by_role:
+        typer.echo(f"  {role}: {calls} calls, ${cost:.4f}")
+    if s.error_rows:
+        typer.echo("failed calls:")
+        for task_id, arm_id, role, error in s.error_rows:
+            typer.echo(f"  {task_id} | {arm_id} | {role}: {error[:200]}")
+    matrix_path = runs_dir / "matrix.sqlite"
+    if matrix_path.exists():
+        store = MatrixStore(matrix_path)
+        rows = store.rows()
+        store.close()
+        typer.echo("OUTCOMES (one row per attempt)")
+        typer.echo("task | arm | seed | true | claimed | cost | calls | wall_s | error")
+        for r in rows:
+            typer.echo(
+                f"{r.task_id} | {r.arm_id} | {r.seed} | {r.true_success} | {r.verifier_claimed} | "
+                f"${r.cost_usd:.4f} | {r.turns} | {r.wall_s:.0f} | {r.error or '-'}"
+            )

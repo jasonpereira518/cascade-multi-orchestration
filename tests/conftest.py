@@ -7,12 +7,16 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from cascade.config import ModelsConfig, ResolvedBudget, load_budget, load_models
 from cascade.harness.ledger import Ledger
 from cascade.taskgen.schema import Task
+
+if TYPE_CHECKING:
+    from tests.agent_helpers import AttemptEnv
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -88,3 +92,19 @@ def fixture_repo(tmp_path: Path) -> FixtureRepo:
 @pytest.fixture
 def task(fixture_repo: FixtureRepo) -> Task:
     return fixture_repo.task
+
+
+@pytest.fixture
+def attempt_env(
+    tmp_path: Path, fixture_repo: FixtureRepo, models: ModelsConfig, budget: ResolvedBudget
+) -> Iterator[AttemptEnv]:
+    from cascade.routing.matrix import MatrixStore
+    from tests.agent_helpers import AttemptEnv
+
+    ledger = Ledger(tmp_path / "ledger.sqlite", budget=budget, models=models)
+    matrix = MatrixStore(tmp_path / "matrix.sqlite")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    yield AttemptEnv(tmp_path, fixture_repo, models, budget, ledger, matrix, runs)
+    ledger.close()
+    matrix.close()

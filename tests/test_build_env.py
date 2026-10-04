@@ -4,6 +4,7 @@ import datetime as dt
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,8 +24,8 @@ from cascade.taskgen.results import ERROR, FAILED, PASSED
 from tests.taskgen_helpers import Upstream, build_upstream
 
 
-def repo(**over: str) -> ResolvedRepo:
-    base = {
+def repo(**over: Any) -> ResolvedRepo:
+    base: dict[str, Any] = {
         "name": "o/Repo",
         "license": "MIT",
         "python_version": "3.12.13",

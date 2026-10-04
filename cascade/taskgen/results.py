@@ -30,6 +30,8 @@ class RunResult:
     timed_out: bool
     outcomes: dict[str, str] = field(default_factory=lambda: {})
     stdout_tail: str = ""
+    # Short failure text per failed/errored test (when the run used --tb other than "no").
+    details: dict[str, str] = field(default_factory=lambda: {})
 
 
 def aggregate(phases: list[tuple[str, str]]) -> str:
@@ -53,7 +55,13 @@ def aggregate(phases: list[tuple[str, str]]) -> str:
 
 def parse_report(text: str) -> dict[str, str]:
     """Return {nodeid: outcome}. Raises ResultsError on a malformed line rather than skipping it."""
+    return parse_report_full(text)[0]
+
+
+def parse_report_full(text: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ({nodeid: outcome}, {nodeid: failure detail}). Malformed lines raise ResultsError."""
     phases: dict[str, list[tuple[str, str]]] = {}
+    details: dict[str, str] = {}
     for lineno, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -65,4 +73,10 @@ def parse_report(text: str) -> dict[str, str]:
         if not (isinstance(nodeid, str) and isinstance(when, str) and isinstance(outcome, str)):
             raise ResultsError(f"malformed report line {lineno}: {line[:120]!r}")
         phases.setdefault(nodeid, []).append((when, outcome))
-    return {nodeid: aggregate(p) for nodeid, p in phases.items()}
+        detail = row.get("detail")
+        # A failing call phase explains the failure better than a later teardown error.
+        wanted = when == "call" or nodeid not in details
+        if isinstance(detail, str) and detail and outcome == FAILED and wanted:
+            details[nodeid] = detail
+    outcomes = {nodeid: aggregate(p) for nodeid, p in phases.items()}
+    return outcomes, {n: d for n, d in details.items() if outcomes.get(n) in (FAILED, ERROR)}

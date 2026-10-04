@@ -5,6 +5,7 @@ description = "Cost-aware routing of models and reasoning effort for agentic Git
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "openai-agents==0.23.1",
     "pydantic==2.13.5",
     "pyyaml==6.0.3",
     "typer==0.27.2",
@@ -37,7 +38,7 @@ extend-exclude = ["tests/fixtures"]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "S607"]
+"tests/**" = ["S101", "S603", "S607", "E501"]  # long literals and test ids read better unwrapped
 
 [tool.pyright]
 include = ["cascade", "tests"]

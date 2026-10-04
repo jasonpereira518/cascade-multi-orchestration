@@ -10,13 +10,10 @@ from cascade.errors import (
     ConfigNotFilledError,
     DuplicateCallError,
     KillSwitchEngagedError,
-    ProviderError,
     SpendNotAllowedError,
 )
-from cascade.harness.ledger import CallContext, Ledger
-from cascade.harness.metered import MeteredClient, estimate_input_tokens
-from cascade.harness.providers.base import LLMRequest, LLMResponse, Message, Provider, Usage
-from cascade.harness.providers.mock import MockProvider, MockReply
+from cascade.harness.ledger import CallContext, Ledger, summarize
+from cascade.harness.providers.base import Usage
 from tests.conftest import ROOT
 
 
@@ -188,91 +185,64 @@ def test_real_provider_still_subject_to_caps_when_gate_open(
         auth(ledger, models, ctx("r3"), max_out=3000, real=True)
 
 
-# --- metered client ----------------------------------------------------------------------------
+# --- attempt-level queries (the matrix reads cost only from here) ------------------------------
 
 
-def request(model: str, text: str = "hello", max_out: int = 200) -> LLMRequest:
-    return LLMRequest(
-        model=model, messages=[Message(role="user", content=text)], max_output_tokens=max_out
+def test_attempt_totals_sum_exactly_the_logged_calls_of_one_attempt(
+    ledger: Ledger, models: ModelsConfig
+) -> None:
+    record(
+        ledger,
+        "c1",
+        small(models),
+        Usage(input_tokens=100, output_tokens=10, reasoning_tokens=5),
+        attempt="a1",
     )
-
-
-def test_metered_call_is_recorded_with_provider_usage(ledger: Ledger, models: ModelsConfig) -> None:
-    provider = MockProvider(
-        [MockReply(input_tokens=100, output_tokens=50, reasoning_tokens=25, latency_s=2.0)]
+    record(ledger, "c2", small(models), Usage(input_tokens=200, output_tokens=20), attempt="a1")
+    record(ledger, "c3", small(models), Usage(input_tokens=999, output_tokens=999), attempt="a2")
+    totals = ledger.attempt_totals(task_id="t1", attempt_id="a1")
+    assert (totals.calls, totals.input_tokens, totals.output_tokens, totals.reasoning_tokens) == (
+        2,
+        300,
+        30,
+        5,
     )
-    MeteredClient(provider, ledger).complete(ctx("m1"), request(small(models)))
-    [row] = ledger.rows()
-    assert (row.input_tokens, row.output_tokens, row.reasoning_tokens) == (100, 50, 25)
-    assert row.latency_s == 2.0 and row.provider == "mock"
-    assert row.cost_usd == pytest.approx(
-        ledger.cost_of(
-            small(models), Usage(input_tokens=100, output_tokens=50, reasoning_tokens=25)
+    expected = sum(r.cost_usd for r in ledger.rows() if r.attempt_id == "a1")
+    assert totals.cost_usd == pytest.approx(expected) and totals.latency_s == pytest.approx(0.2)
+    empty = ledger.attempt_totals(task_id="t1", attempt_id="never")
+    assert (empty.calls, empty.cost_usd) == (0, 0.0)
+
+
+def test_call_count_and_attempt_ids(ledger: Ledger, models: ModelsConfig) -> None:
+    for i, attempt in enumerate(["a2", "a1", "a1", "a2", "a3"]):
+        record(
+            ledger, f"c{i}", small(models), Usage(input_tokens=1, output_tokens=1), attempt=attempt
         )
-    )
+    record(ledger, "other", small(models), Usage(input_tokens=1, output_tokens=1), task="t2")
+    assert ledger.call_count(task_id="t1", attempt_id="a1") == 2
+    assert ledger.attempt_ids(task_id="t1") == ["a1", "a2", "a3"]
+    assert ledger.attempt_ids(task_id="t2") == ["a1"]
 
 
-def test_metered_refuses_repeat_call_id_without_calling_provider(
-    ledger: Ledger, models: ModelsConfig
+def test_summary_works_from_the_file_alone_and_lists_failed_calls(
+    tmp_path: Path, budget: ResolvedBudget, models: ModelsConfig
 ) -> None:
-    provider = MockProvider()
-    client = MeteredClient(provider, ledger)
-    client.complete(ctx("same"), request(small(models)))
-    with pytest.raises(DuplicateCallError):
-        client.complete(ctx("same"), request(small(models)))
-    assert len(provider.calls) == 1 and len(ledger.rows()) == 1
+    db = tmp_path / "s.sqlite"
+    ledger = Ledger(db, budget=budget, models=models)
+    c = lambda cid, arm, role: CallContext(cid, "run", "t1", "a1", arm, role)  # noqa: E731
+    ledger.record(c("1", "armA", "patcher"), provider="mock", model=small(models),
+                  usage=Usage(input_tokens=1000, output_tokens=100, reasoning_tokens=50), latency_s=1.0)  # fmt: skip
+    ledger.record(c("2", "armA", "reviewer"), provider="mock", model=small(models),
+                  usage=Usage(input_tokens=500, output_tokens=50), latency_s=1.0)  # fmt: skip
+    ledger.record(c("3", "armB", "patcher"), provider="mock", model=small(models),
+                  usage=Usage(input_tokens=0, output_tokens=0), latency_s=0.1, status="error",
+                  error="HTTP 500")  # fmt: skip
+    ledger.close()
 
-
-def test_metered_blocks_before_provider_when_kill_switch_set(
-    ledger: Ledger, models: ModelsConfig, budget: ResolvedBudget
-) -> None:
-    provider = MockProvider()
-    budget.kill_switch_path.touch()
-    with pytest.raises(KillSwitchEngagedError):
-        MeteredClient(provider, ledger).complete(ctx("k"), request(small(models)))
-    assert provider.calls == [] and ledger.rows() == []
-
-
-def test_metered_blocks_before_provider_when_over_cap(ledger: Ledger, models: ModelsConfig) -> None:
-    provider = MockProvider()
-    with pytest.raises(BudgetExceededError):
-        MeteredClient(provider, ledger).complete(ctx("big"), request(large(models), max_out=3000))
-    assert provider.calls == [] and ledger.rows() == []
-
-
-def test_metered_records_provider_errors_as_zero_cost_rows(
-    ledger: Ledger, models: ModelsConfig
-) -> None:
-    provider = MockProvider([MockReply(error="upstream 500")])
-    with pytest.raises(ProviderError):
-        MeteredClient(provider, ledger).complete(ctx("e1"), request(small(models)))
-    [row] = ledger.rows()
-    assert row.status == "error" and row.error == "upstream 500" and row.cost_usd == 0.0
-
-
-class _FakeRealProvider(Provider):
-    name = "fake-real"
-    is_real = True
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def complete(self, request: LLMRequest) -> LLMResponse:
-        self.calls += 1
-        return LLMResponse(
-            text="x", usage=Usage(input_tokens=1, output_tokens=1), latency_s=0.0, model="m"
-        )
-
-
-def test_metered_never_reaches_a_real_provider_without_spend_gate(
-    ledger: Ledger, models: ModelsConfig
-) -> None:
-    provider = _FakeRealProvider()
-    with pytest.raises(SpendNotAllowedError):
-        MeteredClient(provider, ledger).complete(ctx("r"), request(small(models)))
-    assert provider.calls == 0 and ledger.rows() == []
-
-
-def test_input_estimate_is_conservative() -> None:
-    req = request("m", text="x" * 300)
-    assert estimate_input_tokens(req) == 100
+    s = summarize(db)  # no config, no budget: just the file
+    assert (s.calls, s.errors) == (3, 1)
+    assert (s.input_tokens, s.output_tokens, s.reasoning_tokens) == (1500, 150, 50)
+    assert [(a, n) for a, n, _ in s.by_arm] == [("armA", 2), ("armB", 1)]
+    assert [(r, n) for r, n, _ in s.by_role] == [("patcher", 2), ("reviewer", 1)]
+    assert s.error_rows == [("t1", "armB", "patcher", "HTTP 500")]
+    assert s.cost_usd == pytest.approx(sum(cost for _, _, cost in s.by_arm)) and s.cost_usd > 0

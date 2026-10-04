@@ -1,54 +1,33 @@
-"""Provider interface. Providers do I/O only; metering and caps live in the ledger layer."""
+"""Model sources: where an arm's model comes from. Metering and caps live in harness.models."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar
 
+from agents.models.interface import Model
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class Usage(BaseModel):
+    """Non-overlapping token counts, the shape the ledger prices.
 
-
-class Message(_Strict):
-    role: Literal["system", "user", "assistant"]
-    content: str
-
-
-class LLMRequest(_Strict):
-    model: str
-    messages: list[Message]
-    reasoning_effort: str | None = None
-    # Hard ceiling on generated tokens, including reasoning tokens (billed as output).
-    max_output_tokens: Annotated[int, Field(gt=0)]
-
-
-class Usage(_Strict):
-    """Non-overlapping token counts. Providers must normalize to this shape.
-
-    ``output_tokens`` EXCLUDES ``reasoning_tokens``. Some APIs report reasoning tokens as a subset
-    of output tokens; the provider adapter subtracts them so the ledger never double-counts.
+    ``output_tokens`` EXCLUDES ``reasoning_tokens``. The Agents SDK reports reasoning tokens as a
+    subset of output tokens; harness.models subtracts them so nothing is billed twice.
     """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     input_tokens: Annotated[int, Field(ge=0)]
     output_tokens: Annotated[int, Field(ge=0)]
     reasoning_tokens: Annotated[int, Field(ge=0)] = 0
 
 
-class LLMResponse(_Strict):
-    text: str
-    usage: Usage
-    latency_s: Annotated[float, Field(ge=0)]
-    model: str
-    finish_reason: str = "stop"
-
-
-class Provider(ABC):
+class ModelSource(ABC):
     name: ClassVar[str]
-    # Real providers bill money. The metered client refuses them unless the spend gate is open.
+    # Real sources bill money. MeteredModel refuses them unless the spend gate is open.
     is_real: ClassVar[bool]
 
     @abstractmethod
-    def complete(self, request: LLMRequest) -> LLMResponse: ...
+    def model_for(self, model_name: str, role: str) -> Model:
+        """Return the (unmetered) SDK model that serves ``role`` for the named model."""

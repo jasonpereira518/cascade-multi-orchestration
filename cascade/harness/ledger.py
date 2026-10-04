@@ -68,6 +68,16 @@ class CallContext:
     role: str
 
 
+@dataclass(frozen=True)
+class AttemptTotals:
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cost_usd: float
+    latency_s: float
+
+
 class CallRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -95,7 +105,8 @@ class Ledger:
     ) -> None:
         self._budget = budget
         self._models = models
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None)
+        # The Agents SDK runs coroutines on the calling thread, but allow cross-thread use anyway.
+        self._conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
@@ -230,6 +241,36 @@ class Ledger:
         ).fetchone()
         return int(row[0])
 
+    def call_count(self, *, task_id: str, attempt_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM calls WHERE task_id = ? AND attempt_id = ?", (task_id, attempt_id)
+        ).fetchone()
+        return int(row[0])
+
+    def attempt_ids(self, *, task_id: str) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT attempt_id FROM calls WHERE task_id = ? ORDER BY attempt_id",
+            (task_id,),
+        )
+        return [str(r[0]) for r in rows.fetchall()]
+
+    def attempt_totals(self, *, task_id: str, attempt_id: str) -> AttemptTotals:
+        """Everything reported about an attempt's cost comes from here: sums over logged calls."""
+        row = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),"
+            " COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cost_usd), 0.0),"
+            " COALESCE(SUM(latency_s), 0.0) FROM calls WHERE task_id = ? AND attempt_id = ?",
+            (task_id, attempt_id),
+        ).fetchone()
+        return AttemptTotals(
+            calls=int(row[0]),
+            input_tokens=int(row[1]),
+            output_tokens=int(row[2]),
+            reasoning_tokens=int(row[3]),
+            cost_usd=float(row[4]),
+            latency_s=float(row[5]),
+        )
+
     def rows(self) -> list[CallRecord]:
         cur = self._conn.execute("SELECT * FROM calls ORDER BY rowid")
         out: list[CallRecord] = []
@@ -237,3 +278,50 @@ class Ledger:
             data: dict[str, Any] = dict(row)
             out.append(CallRecord.model_validate(data))
         return out
+
+
+@dataclass(frozen=True)
+class LedgerSummary:
+    calls: int
+    errors: int
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    by_arm: list[tuple[str, int, float]]  # (arm_id, calls, cost_usd)
+    by_role: list[tuple[str, int, float]]  # (role, calls, cost_usd)
+    error_rows: list[tuple[str, str, str, str]]  # (task_id, arm_id, role, error)
+
+
+def summarize(db_path: Path | str) -> LedgerSummary:
+    """Summarize a ledger file with no config needed. Read-only."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(status = 'error'), 0), COALESCE(SUM(cost_usd), 0.0),"
+            " COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),"
+            " COALESCE(SUM(reasoning_tokens), 0) FROM calls"
+        ).fetchone()
+        by_arm = conn.execute(
+            "SELECT arm_id, COUNT(*), SUM(cost_usd) FROM calls GROUP BY arm_id ORDER BY arm_id"
+        ).fetchall()
+        by_role = conn.execute(
+            "SELECT role, COUNT(*), SUM(cost_usd) FROM calls GROUP BY role ORDER BY role"
+        ).fetchall()
+        errors = conn.execute(
+            "SELECT task_id, arm_id, role, COALESCE(error, '') FROM calls"
+            " WHERE status = 'error' ORDER BY rowid"
+        ).fetchall()
+    finally:
+        conn.close()
+    return LedgerSummary(
+        calls=int(total[0]),
+        errors=int(total[1]),
+        cost_usd=float(total[2]),
+        input_tokens=int(total[3]),
+        output_tokens=int(total[4]),
+        reasoning_tokens=int(total[5]),
+        by_arm=[(str(a), int(n), float(c)) for a, n, c in by_arm],
+        by_role=[(str(r), int(n), float(c)) for r, n, c in by_role],
+        error_rows=[(str(t), str(a), str(r), str(e)) for t, a, r, e in errors],
+    )
