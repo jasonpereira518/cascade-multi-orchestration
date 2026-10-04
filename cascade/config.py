@@ -197,6 +197,8 @@ class RepoSpec(_Strict):
     # What GitHub's API reports as the license id, when it differs from ``license``. Dual-licensed
     # repos are reported as NOASSERTION, which would otherwise fail the license check at mine time.
     github_license_id: str | None = None
+    # Disabled repos are skipped by `taskgen run-all` unless named explicitly (e.g. a dormant repo).
+    enabled: bool = True
     notes: str = ""
 
 
@@ -226,6 +228,9 @@ class ReposConfig(_Strict):
 
     def unfilled(self) -> list[str]:
         return find_todos(self)
+
+    def enabled_repos(self) -> list[str]:
+        return [r.name for r in self.repos if r.enabled]
 
     def resolve(self, name: str) -> ResolvedRepo:
         """Return the named repo's parameters, or raise if any field it needs is still TODO.

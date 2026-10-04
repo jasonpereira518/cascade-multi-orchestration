@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -10,6 +11,7 @@ import typer
 
 from cascade.agents import runner as agent_runner
 from cascade.agents.pipeline import PipelineConfig
+from cascade.agents.triage import format_triage, triage_runs
 from cascade.config import load_budget, load_models, load_repos
 from cascade.errors import CascadeError
 from cascade.harness.ledger import Ledger, summarize
@@ -19,7 +21,18 @@ from cascade.harness.providers.mock import MockModelSource
 from cascade.harness.providers.openai import OpenAIModelSource
 from cascade.routing.matrix import MatrixStore
 from cascade.taskgen import attrition
+from cascade.taskgen import audit as audit_mod
+from cascade.taskgen import split as split_mod
 from cascade.taskgen.build_env import DockerUnavailableError, docker_available
+from cascade.taskgen.github import TOKEN_ENV
+from cascade.taskgen.manifest import finalize_manifest, read_manifest
+from cascade.taskgen.orchestrate import (
+    DEFAULT_JOBS,
+    DEFAULT_WORKERS,
+    format_report,
+    repo_funnel,
+    run_all,
+)
 from cascade.taskgen.pipeline import STAGE_ORDER, run_pipeline
 from cascade.taskgen.schema import Task
 from cascade.taskgen.store import StageStore
@@ -27,6 +40,12 @@ from cascade.taskgen.store import StageStore
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Cascade CLI.")
 taskgen_app = typer.Typer(no_args_is_help=True, help="Build tasks from a repo's merged PRs ($0).")
 app.add_typer(taskgen_app, name="taskgen")
+split_app = typer.Typer(no_args_is_help=True, help="The frozen repo-level train/test split.")
+app.add_typer(split_app, name="split")
+audit_app = typer.Typer(no_args_is_help=True, help="Human audit of tasks.")
+app.add_typer(audit_app, name="audit")
+tasks_app = typer.Typer(no_args_is_help=True, help="Operations on the task manifest.")
+app.add_typer(tasks_app, name="tasks")
 
 
 @app.callback()
@@ -286,3 +305,231 @@ def ledger_summary_command(
                 f"{r.task_id} | {r.arm_id} | {r.seed} | {r.true_success} | {r.verifier_claimed} | "
                 f"${r.cost_usd:.4f} | {r.turns} | {r.wall_s:.0f} | {r.error or '-'}"
             )
+
+
+# --- multi-repo task generation, split, audit, finalize, triage -----------------------------
+
+_Manifest = Annotated[Path, typer.Option(help="Task manifest.")]
+_SplitFile = Annotated[Path, typer.Option(help="The frozen split file.")]
+_AuditFile = Annotated[Path, typer.Option(help="The append-only audit verdict log.")]
+
+
+@taskgen_app.command("run-all")
+def taskgen_run_all(
+    repo: Annotated[
+        list[str] | None,
+        typer.Option("--repo", help="Repo to run (repeatable). Default: enabled repos."),
+    ] = None,
+    include_disabled: Annotated[
+        bool, typer.Option(help="Also run repos marked enabled: false.")
+    ] = False,
+    workers: Annotated[int, typer.Option(help="Repos in parallel.")] = DEFAULT_WORKERS,
+    jobs: Annotated[int, typer.Option(help="PRs in parallel within each repo.")] = DEFAULT_JOBS,
+    stop_after: Annotated[
+        str, typer.Option(help=f"Last stage to run: {', '.join(STAGE_ORDER)}.")
+    ] = "validate",
+    configs_dir: _ConfigsDir = Path("configs"),
+    runs_dir: _RunsDir = Path("runs/taskgen"),
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    status_md: _StatusMd = Path("STATUS.md"),
+) -> None:
+    """Run the task pipeline over many repos in parallel. Resumable: rerun to continue."""
+    if not os.environ.get(TOKEN_ENV):
+        raise _fail(f"{TOKEN_ENV} is not set; mining needs it (read-only, public repos is enough)")
+    try:
+        cfg = load_repos(configs_dir / "repos.yaml")
+        if repo:
+            names = list(repo)
+        elif include_disabled:
+            names = [r.name for r in cfg.repos]
+        else:
+            names = cfg.enabled_repos()
+        resolved = [cfg.resolve(n) for n in names]
+        outcomes = run_all(
+            resolved,
+            runs_dir=runs_dir,
+            manifest_path=manifest,
+            status_md=status_md,
+            stop_after=stop_after,
+            workers=workers,
+            jobs=jobs,
+        )
+        funnels = [f for r in resolved if (f := repo_funnel(r, runs_dir)) is not None]
+        typer.echo(format_report(funnels, outcomes=outcomes))
+    except (CascadeError, ValueError) as e:
+        raise _fail(str(e)) from e
+    if any(o.error for o in outcomes):
+        raise typer.Exit(1)
+
+
+@taskgen_app.command("report")
+def taskgen_report(
+    configs_dir: _ConfigsDir = Path("configs"),
+    runs_dir: _RunsDir = Path("runs/taskgen"),
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+) -> None:
+    """Per-stage attrition and per-repo task counts from saved state (no network, no Docker)."""
+    try:
+        cfg = load_repos(configs_dir / "repos.yaml")
+        resolved = [cfg.resolve(r.name) for r in cfg.repos]
+        tasks = read_manifest(manifest)
+    except (CascadeError, ValueError) as e:
+        raise _fail(str(e)) from e
+    funnels = [f for r in resolved if (f := repo_funnel(r, runs_dir)) is not None]
+    have = {f.repo for f in funnels}
+    split_counts: dict[str, dict[str, int]] = {}
+    for t in tasks:
+        side = split_counts.setdefault(t.repo, {})
+        key = t.split or "unassigned"
+        side[key] = side.get(key, 0) + 1
+    missing = [r.name for r in resolved if r.name not in have]
+    typer.echo(format_report(funnels, missing=missing, split_counts=split_counts))
+
+
+@split_app.command("freeze")
+def split_freeze(
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    split_file: _SplitFile = Path("tasks/split.json"),
+    salt: Annotated[
+        str, typer.Option(help="Hash salt (part of the frozen record).")
+    ] = split_mod.DEFAULT_SALT,
+    target: Annotated[
+        float, typer.Option(help="Target fraction of tasks in the test split.")
+    ] = split_mod.DEFAULT_TARGET,
+    force: Annotated[
+        bool, typer.Option(help="Overwrite a frozen split (invalidates results).")
+    ] = False,
+) -> None:
+    """Freeze the repo-level split from per-repo task counts. Refuses to overwrite."""
+    try:
+        counts: dict[str, int] = {}
+        for t in read_manifest(manifest):
+            counts[t.repo] = counts.get(t.repo, 0) + 1
+        result = split_mod.freeze(
+            counts, path=split_file, salt=salt, target_test_fraction=target, force=force
+        )
+    except (CascadeError, ValueError) as e:
+        raise _fail(str(e)) from e
+    _echo_split(result, counts)
+
+
+def _echo_split(result: split_mod.SplitFile, counts: dict[str, int]) -> None:
+    per_side = {"train": 0, "test": 0}
+    for repo_name, side in sorted(result.assignments.items()):
+        typer.echo(f"{side:5s} {repo_name} ({counts.get(repo_name, 0)} tasks)")
+        per_side[side] += counts.get(repo_name, 0)
+    total = sum(per_side.values()) or 1
+    typer.echo(
+        f"train {per_side['train']} tasks, test {per_side['test']} tasks "
+        f"({per_side['test'] / total:.0%} test; target {result.target_test_fraction:.0%})"
+    )
+
+
+@split_app.command("show")
+def split_show(
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    split_file: _SplitFile = Path("tasks/split.json"),
+) -> None:
+    """Print the frozen split and the task counts it gives."""
+    try:
+        result = split_mod.read_split(split_file)
+        tasks = read_manifest(manifest)
+    except (CascadeError, ValueError) as e:
+        raise _fail(str(e)) from e
+    counts: dict[str, int] = {}
+    for t in tasks:
+        counts[t.repo] = counts.get(t.repo, 0) + 1
+    typer.echo(f"frozen {result.frozen_at} with salt {result.salt!r}")
+    if result.late_assignments:
+        typer.echo("assigned after the freeze: " + ", ".join(sorted(result.late_assignments)))
+    _echo_split(result, counts)
+
+
+@tasks_app.command("finalize")
+def tasks_finalize(
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    split_file: _SplitFile = Path("tasks/split.json"),
+    audit_file: _AuditFile = Path("tasks/audit.jsonl"),
+    assign_new: Annotated[
+        bool, typer.Option(help="Assign repos added after the freeze by hash bucket.")
+    ] = True,
+) -> None:
+    """Stamp the frozen split, audit verdicts and recomputed model-free features on the manifest."""
+    try:
+        result = finalize_manifest(manifest, split_file, audit_file, assign_new=assign_new)
+    except (CascadeError, ValueError) as e:
+        raise _fail(str(e)) from e
+    typer.echo(f"{result.tasks} task(s) finalized")
+    typer.echo("split: " + ", ".join(f"{k} {v}" for k, v in sorted(result.by_split.items())))
+    typer.echo("audit: " + ", ".join(f"{k} {v}" for k, v in sorted(result.by_audit.items())))
+    if result.new_repos:
+        typer.echo("assigned by hash bucket (after the freeze): " + ", ".join(result.new_repos))
+
+
+@audit_app.command("review")
+def audit_review(
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    audit_file: _AuditFile = Path("tasks/audit.jsonl"),
+    repo: Annotated[str | None, typer.Option(help="Only this repo.")] = None,
+    split: Annotated[str | None, typer.Option(help="Only this split: train or test.")] = None,
+    task: Annotated[str | None, typer.Option(help="Only this task id.")] = None,
+    redo: Annotated[
+        bool, typer.Option(help="Also show tasks that already have a verdict.")
+    ] = False,
+    full: Annotated[bool, typer.Option(help="Do not truncate long issues and patches.")] = False,
+) -> None:
+    """Review tasks one at a time and record a verdict for each. Safe to quit and resume."""
+    try:
+        all_tasks = read_manifest(manifest)
+    except ValueError as e:
+        raise _fail(f"unreadable manifest: {e}") from e
+    tasks = [
+        t
+        for t in all_tasks
+        if (repo is None or t.repo == repo)
+        and (split is None or t.split == split)
+        and (task is None or t.task_id == task)
+    ]
+    if not tasks:
+        raise _fail("no tasks match; build the manifest first, or loosen --repo/--split/--task")
+    try:
+        stats = audit_mod.run_review(
+            tasks,
+            audit_file,
+            ask=lambda q: typer.prompt(q, default="", show_default=False),
+            echo=typer.echo,
+            redo=redo,
+            full=full,
+        )
+    except (typer.Abort, EOFError):
+        typer.echo("\ninput ended; every verdict so far is saved")
+        return
+    typer.echo(
+        f"recorded {stats.recorded}, skipped {stats.skipped}, left {stats.remaining}"
+        + (" (quit early)" if stats.quit else "")
+    )
+
+
+@audit_app.command("status")
+def audit_status_command(
+    manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    audit_file: _AuditFile = Path("tasks/audit.jsonl"),
+) -> None:
+    """Progress against the audit targets (60 ok, minimum 40, about 25-30 in the test split)."""
+    try:
+        status = audit_mod.audit_status(
+            read_manifest(manifest), audit_mod.load_verdicts(audit_file)
+        )
+    except (CascadeError, ValueError) as e:
+        raise _fail(str(e)) from e
+    typer.echo(audit_mod.format_status(status))
+
+
+@app.command("triage")
+def triage_command(
+    runs_dir: Annotated[Path, typer.Option(help="Where matrix.sqlite and attempts/ live.")] = Path(
+        "runs"
+    ),
+) -> None:
+    """Classify finished attempts: pipeline bug, Verifier issue, or genuine model failure."""
+    typer.echo(format_triage(triage_runs(runs_dir)))

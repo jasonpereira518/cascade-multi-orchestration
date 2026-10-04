@@ -1,14 +1,45 @@
 # Status
 
-**Stage:** STOP B (Phase 2: agent pipeline and walking skeleton) reached. Halted for the human; see `NEXT.md`.
+**Stage:** STOP C (Phase 3: scale, split, audit) reached. Halted for the human; see `NEXT.md`.
 **Updated:** 2026-10-04
 
-**Acceptance:** `make check` and `make smoke` pass, and the full pipeline passes end to end with the
-mock provider. One qualification, stated plainly: the brief said "on the validated tasks", and
-**no validated task exists yet** (the Phase 1 live run is still blocked on a GitHub token and the
-date window). The acceptance run therefore uses the **synthetic fixture task**, labeled as such.
-Separately, I ran the real `cascade run` CLI through real Docker on a real click PR as an
-exploratory plumbing check (below). **Nothing has been run against the real OpenAI API.**
+**Acceptance (Phase 3):** audit CLI built and tested, split deterministic and tested, difficulty
+features computed without a model, per-stage attrition and per-repo counts printable, `make check` and
+`make smoke` pass. **Not met, and why:** the *candidate manifest was not produced*. Mining needs
+`GITHUB_TOKEN` (unset) and the date window in `configs/repos.yaml` is still `TODO`. I have not borrowed
+another credential. **Step 1 (triage the real skeleton run) had no data**: no real `cascade run` has
+happened, so there were no failures to classify. I built the triage tool (`cascade triage`) so it is
+ready when results arrive.
+
+## Phase 3 (this stop)
+
+- **Scale** (`taskgen/orchestrate.py`, `cascade taskgen run-all`): all enabled repos in parallel
+  (repos x PRs), resumable and idempotent, a failing repo does not stop the rest, one writer for the
+  manifest and this file. `cascade taskgen report` prints per-stage attrition, drop reasons, and
+  per-repo task counts (with split) from saved state, with no network and no Docker.
+- **Split** (`taskgen/split.py`, `cascade split freeze|show`): repo-level holdout by SHA-256 hash,
+  frozen in `tasks/split.json`, refuses to overwrite, late repos by hash bucket, `fitting_tasks`
+  guard. **Not frozen yet**: it needs the real per-repo counts (see risk 6 for a coarseness problem).
+- **Audit** (`taskgen/audit.py`, `cascade audit review|status`): one task at a time (issue, gold patch,
+  test patch, model-free hints, tests that must pass), verdicts ok / underspecified / leaks_fix /
+  arbitrary_test appended to `tasks/audit.jsonl`, resumable, `--redo`, `--full`, filters.
+- **Features** (`taskgen/features.py`): 15 model-free difficulty features, recomputed by
+  `cascade tasks finalize`, which also stamps the split and audit verdicts onto the manifest.
+- **Triage** (`agents/triage.py`, `cascade triage`): see `DECISIONS.md` 63.
+- **Config**: `enabled` flag per repo; jinja (dormant) is `enabled: false`.
+
+| Check | Result |
+|---|---|
+| `make check` (ruff, format, pyright strict, pytest) | exit 0; 607 passed, 1 skipped (real-Docker test), smoke test run separately |
+| `make smoke` | exit 0 |
+| New tests | split 23, audit 33, manifest/store/config 17, orchestrate 12, triage 26, CLI 19, features 11 |
+| Mutation check on the new logic (20 deliberate breakages, scratch edits restored) | 19 caught after one new test; 1 equivalent mutant (no observable difference) |
+| Real Docker / real GitHub / real model | **not exercised this phase**; orchestration is tested against a fake GitHub, real local git upstreams, a fake docker, and a fake executor, all labeled synthetic |
+
+Bugs found by the Phase 3 tests: none in the product code. Two test assumptions were wrong and fixed
+(run-all deliberately reports `manifest_tasks == 0` per repo; two separately built git upstreams have
+different shas). The mutation check found one weak test (the 25-character leak threshold was never
+exercised); it is fixed.
 
 ## Done
 
@@ -38,7 +69,7 @@ exploratory plumbing check (below). **Nothing has been run against the real Open
 
 | Check | Result |
 |---|---|
-| `make check` (ruff, format, pyright strict, pytest) | exit 0; 462 passed, 1 skipped (the real-Docker test, which passes when given an image) |
+| `make check` at STOP B (ruff, format, pyright strict, pytest) | exit 0; 462 passed, 1 skipped (the real-Docker test, which passes when given an image) |
 | `make smoke` (full pipeline, fixture, mock) | exit 0 |
 | Real-Docker sandbox test (`CASCADE_TEST_DOCKER_IMAGE=ubuntu:24.04`) | passes: 0 routes off the box, no `.git`, workspace writable, root read-only |
 | click image built for real; click's suite run offline in it | 2241 passed, 24 skipped, 1 xfailed in ~4 s |
@@ -145,3 +176,13 @@ commented, and no token handled by me. The pipeline itself still reads only `GIT
 8. **Test suite takes about 2.5 minutes** (real pytest subprocesses); CI will be correspondingly slow.
 9. **Earlier limits still apply:** ledger overshoot under parallelism, leak-guard excerpt limit, the
    unexecuted GraphQL path, issue text being current text.
+6. **A repo-level split cannot reach 25-30 test tasks with this repo set.** Click is about 60% of the
+   projected supply, so the hash split puts a small repo or two in test (roughly 13 of 60 with the
+   default salt on upper-bound counts) unless click itself is held out, which starves train. This is a
+   structural cost of holding out whole repos, not a bug. Decision needed (`NEXT.md`).
+7. **The audit is the bottleneck and is a human judgment.** About 60 tasks to read, each with a patch.
+   The hints are heuristics (verbatim overlap, undeclared names) and will miss subtle leaks and flag
+   harmless ones. Verdicts are the only thing that decides which tasks enter experiments.
+8. **Nothing in Phase 3 touched the live services.** GraphQL against the real API, the real clone
+   and image build at scale, and Docker load at `workers x jobs` are untested; start with the
+   defaults (4 x 2) and watch the first run.

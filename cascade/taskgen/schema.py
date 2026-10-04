@@ -14,15 +14,43 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+Count = Annotated[int, Field(ge=0)]
+
+
 class Features(_Strict):
-    src_files: Annotated[int, Field(ge=0)]
-    src_lines: Annotated[int, Field(ge=0)]
-    issue_chars: Annotated[int, Field(ge=0)]
+    """Task features. The first four are the SPEC's; the rest are model-free difficulty features
+    computed by ``taskgen.features`` from the patches, issue text, and test lists (no LLM, no repo
+    access). They default to zero so manifests written before they existed still load."""
+
+    src_files: Count
+    src_lines: Count
+    issue_chars: Count
     test_runtime_s: Annotated[float, Field(ge=0)]
+    src_hunks: Count = 0
+    src_added: Count = 0
+    src_removed: Count = 0
+    gold_files: Count = 0
+    test_files: Count = 0
+    test_added: Count = 0
+    f2p_count: Count = 0
+    p2p_count: Count = 0
+    issue_words: Count = 0
+    issue_code_blocks: Count = 0
+    issue_has_traceback: bool = False
+    issue_identifiers: Count = 0
+    changed_symbols: Count = 0
+    changed_symbols_in_issue: Count = 0
+    new_public_symbols: Count = 0
+
+
+AuditStatus = Literal["pending", "ok", "underspecified", "leaks_fix", "arbitrary_test"]
 
 
 class Audit(_Strict):
-    status: Literal["pending", "ok", "rejected"] = "pending"
+    """Human audit result. The verdict log (tasks/audit.jsonl) is the source of truth; this field is
+    filled from it by `cascade tasks finalize`. Only status "ok" tasks enter experiments."""
+
+    status: AuditStatus = "pending"
     notes: str = ""
 
 

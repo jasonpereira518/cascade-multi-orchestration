@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import json
 import re
 import shutil
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from cascade.taskgen.build_env import (
     docker_available,
     image_exists,
 )
+from cascade.taskgen.features import compute_features
 from cascade.taskgen.filter import FilterContext, filter_metadata
 from cascade.taskgen.github import GitHubClient, PRCandidate
 from cascade.taskgen.gitrepo import (
@@ -42,9 +43,10 @@ from cascade.taskgen.gitrepo import (
     derive_patches,
     ensure_clone,
 )
+from cascade.taskgen.manifest import merge_repo_tasks
 from cascade.taskgen.mine import check_repo, mine
 from cascade.taskgen.results import ERROR as OUTCOME_ERROR
-from cascade.taskgen.schema import Audit, Features, Task
+from cascade.taskgen.schema import Audit, Task
 from cascade.taskgen.store import DROPPED, ENV, ERROR, FILTER, OK, PATCH, VALIDATE, StageStore
 from cascade.taskgen.validate import PATCH_APPLY_FAILED, TestExecutor, validate_task
 
@@ -194,6 +196,7 @@ def run_env_and_validate(
     deps: PipelineDeps,
     *,
     do_validate: bool,
+    jobs: int = 1,
 ) -> list[str]:
     errors: list[str] = []
     pending_env = [n for n in store.passed(PATCH) if not store.is_final(n, ENV)]
@@ -210,82 +213,106 @@ def run_env_and_validate(
         )
     cap = float(repo.limits.max_test_runtime_s)
 
-    for number in pending_env:
-        pd = _stage_data(store, number, PATCH)
-        try:
-            factory = _workspace_factory(
-                clone, pd["base_commit"], pd["test_patch"], pd["gold_patch"], work, f"env-{number}"
-            )
-            ws = factory(True)
-            try:
-                run = executor.run(
-                    workspace=ws, pytest_args=_test_files(pd["test_patch"]), timeout_s=cap
-                )
-            finally:
-                shutil.rmtree(ws, ignore_errors=True)
-        except PatchApplyError as e:
-            store.put_stage(number, ENV, DROPPED, PATCH_APPLY_FAILED, {"message": str(e)})
-            continue
-        except CascadeError as e:
-            store.put_stage(number, ENV, ERROR, "env_exception", {"message": str(e)})
-            errors.append(f"PR {number} env: {e}")
-            continue
-        collected_ok = not any(
-            "::" not in nodeid and outcome == OUTCOME_ERROR
-            for nodeid, outcome in run.outcomes.items()
-        )
-        ran = any("::" in nodeid for nodeid in run.outcomes)
-        if run.exit_code not in (0, 1) or run.timed_out or not collected_ok:
-            store.put_stage(
-                number, ENV, DROPPED, ENV_COLLECT_FAILED,
-                {"exit_code": run.exit_code, "tail": run.stdout_tail},
-            )  # fmt: skip
-        elif not ran:
-            store.put_stage(number, ENV, DROPPED, ENV_NO_TESTS, {"tail": run.stdout_tail})
-        else:
-            store.put_stage(number, ENV, OK)
+    def env_one(number: int) -> str | None:
+        return _env_check(store, clone, work, executor, cap, number)
 
+    def validate_one(number: int) -> str | None:
+        return _validate_one(store, clone, work, executor, cap, number)
+
+    errors += _run_parallel(pending_env, env_one, jobs)
     if not do_validate:
         return errors
-    for number in [n for n in store.passed(ENV) if not store.is_final(n, VALIDATE)]:
-        pd = _stage_data(store, number, PATCH)
-        factory = _workspace_factory(
-            clone, pd["base_commit"], pd["test_patch"], pd["gold_patch"], work, f"val-{number}"
-        )
-        try:
-            result = validate_task(
-                executor,
-                factory,
-                runs=3,
-                runtime_cap_s=cap,
-                cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
-            )
-        except PatchApplyError as e:
-            store.put_stage(number, VALIDATE, DROPPED, PATCH_APPLY_FAILED, {"message": str(e)})
-            continue
-        except CascadeError as e:
-            store.put_stage(number, VALIDATE, ERROR, "validate_exception", {"message": str(e)})
-            errors.append(f"PR {number} validate: {e}")
-            continue
-        detail = {
-            "flaky": result.flaky,
-            "detail": result.detail,
-            "test_runtime_s": result.test_runtime_s,
-        }
-        if result.validated:
-            store.put_stage(
-                number,
-                VALIDATE,
-                OK,
-                data={
-                    **detail,
-                    "fail_to_pass": result.fail_to_pass,
-                    "pass_to_pass": result.pass_to_pass,
-                },
-            )
-        else:
-            store.put_stage(number, VALIDATE, DROPPED, result.reason, detail)
+    to_validate = [n for n in store.passed(ENV) if not store.is_final(n, VALIDATE)]
+    errors += _run_parallel(to_validate, validate_one, jobs)
     return errors
+
+
+def _run_parallel(numbers: list[int], fn: Callable[[int], str | None], jobs: int) -> list[str]:
+    """Run ``fn`` over PR numbers, ``jobs`` at a time. Returns the retryable error messages.
+
+    Each PR's work is independent and writes its own stage row, so a crash loses nothing that is
+    finished. Unexpected exceptions propagate (a bug must be visible, not logged and forgotten).
+    """
+    if jobs <= 1:
+        results = [fn(n) for n in numbers]
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(fn, numbers))
+    return [r for r in results if r]
+
+
+def _env_check(
+    store: StageStore, clone: Path, work: Path, executor: TestExecutor, cap: float, number: int
+) -> str | None:
+    pd = _stage_data(store, number, PATCH)
+    try:
+        factory = _workspace_factory(
+            clone, pd["base_commit"], pd["test_patch"], pd["gold_patch"], work, f"env-{number}"
+        )
+        ws = factory(True)
+        try:
+            run = executor.run(
+                workspace=ws, pytest_args=_test_files(pd["test_patch"]), timeout_s=cap
+            )
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+    except PatchApplyError as e:
+        store.put_stage(number, ENV, DROPPED, PATCH_APPLY_FAILED, {"message": str(e)})
+        return None
+    except CascadeError as e:
+        store.put_stage(number, ENV, ERROR, "env_exception", {"message": str(e)})
+        return f"PR {number} env: {e}"
+    collected_ok = not any(
+        "::" not in nodeid and outcome == OUTCOME_ERROR for nodeid, outcome in run.outcomes.items()
+    )
+    ran = any("::" in nodeid for nodeid in run.outcomes)
+    if run.exit_code not in (0, 1) or run.timed_out or not collected_ok:
+        store.put_stage(
+            number, ENV, DROPPED, ENV_COLLECT_FAILED,
+            {"exit_code": run.exit_code, "tail": run.stdout_tail},
+        )  # fmt: skip
+    elif not ran:
+        store.put_stage(number, ENV, DROPPED, ENV_NO_TESTS, {"tail": run.stdout_tail})
+    else:
+        store.put_stage(number, ENV, OK)
+    return None
+
+
+def _validate_one(
+    store: StageStore, clone: Path, work: Path, executor: TestExecutor, cap: float, number: int
+) -> str | None:
+    pd = _stage_data(store, number, PATCH)
+    factory = _workspace_factory(
+        clone, pd["base_commit"], pd["test_patch"], pd["gold_patch"], work, f"val-{number}"
+    )
+    try:
+        result = validate_task(
+            executor, factory, runs=3, runtime_cap_s=cap,
+            cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
+        )  # fmt: skip
+    except PatchApplyError as e:
+        store.put_stage(number, VALIDATE, DROPPED, PATCH_APPLY_FAILED, {"message": str(e)})
+        return None
+    except CascadeError as e:
+        store.put_stage(number, VALIDATE, ERROR, "validate_exception", {"message": str(e)})
+        return f"PR {number} validate: {e}"
+    detail = {
+        "flaky": result.flaky,
+        "detail": result.detail,
+        "test_runtime_s": result.test_runtime_s,
+    }
+    if result.validated:
+        store.put_stage(
+            number, VALIDATE, OK,
+            data={
+                **detail,
+                "fail_to_pass": result.fail_to_pass,
+                "pass_to_pass": result.pass_to_pass,
+            },
+        )  # fmt: skip
+    else:
+        store.put_stage(number, VALIDATE, DROPPED, result.reason, detail)
+    return None
 
 
 def build_tasks(store: StageStore, repo: ResolvedRepo) -> list[Task]:
@@ -309,10 +336,13 @@ def build_tasks(store: StageStore, repo: ResolvedRepo) -> list[Task]:
                 fail_to_pass=vd["fail_to_pass"],
                 pass_to_pass=vd["pass_to_pass"],
                 image=image,
-                features=Features(
-                    src_files=pd["src_files"],
-                    src_lines=pd["src_lines"],
-                    issue_chars=len(issue.title) + len(issue.body),
+                features=compute_features(
+                    issue_title=issue.title,
+                    issue_body=issue.body,
+                    gold_patch=pd["gold_patch"],
+                    test_patch=pd["test_patch"],
+                    fail_to_pass=vd["fail_to_pass"],
+                    pass_to_pass=vd["pass_to_pass"],
                     test_runtime_s=vd["test_runtime_s"],
                 ),
                 audit=Audit(status="pending"),
@@ -322,20 +352,8 @@ def build_tasks(store: StageStore, repo: ResolvedRepo) -> list[Task]:
 
 
 def write_manifest(path: Path, tasks: list[Task], repo_name: str) -> None:
-    """Rewrite this repo's lines in the manifest, keeping other repos' lines. Atomic."""
-    kept: dict[str, str] = {}
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                row = json.loads(line)
-                if row["repo"] != repo_name:
-                    kept[row["task_id"]] = line
-    for task in tasks:
-        kept[task.task_id] = task.model_dump_json()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text("".join(kept[k] + "\n" for k in sorted(kept)), encoding="utf-8")
-    tmp.replace(path)
+    """Rewrite this repo's lines in the manifest; other repos, splits, and audits are kept."""
+    merge_repo_tasks(path, tasks, repo_name)
 
 
 def refresh_status(store: StageStore, repo: ResolvedRepo, status_md: Path) -> None:
@@ -358,6 +376,7 @@ def run_pipeline(
     status_md: Path | None,
     stop_after: str = VALIDATE,
     deps: PipelineDeps | None = None,
+    jobs: int = 1,
 ) -> PipelineSummary:
     if stop_after not in STAGE_ORDER:
         raise ValueError(f"stop_after must be one of {STAGE_ORDER}")
@@ -381,7 +400,7 @@ def run_pipeline(
             summary.stage_reached = PATCH
         if reach >= 3:
             errs = run_env_and_validate(
-                store, repo, clone, root / "work", deps, do_validate=reach >= 4
+                store, repo, clone, root / "work", deps, do_validate=reach >= 4, jobs=jobs
             )
             summary.errors += errs
             summary.stage_reached = VALIDATE if reach >= 4 else ENV

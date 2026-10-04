@@ -4,6 +4,9 @@ A row in ``stage_results`` is keyed by (pr_number, stage). Outcomes:
 - "ok":      the PR passed this stage; ``data`` holds what later stages need.
 - "dropped": the PR was rejected, with a machine-readable ``reason``. Final; never re-evaluated.
 - "error":   something transient or environmental failed (docker, network). Retried on rerun.
+
+One store is shared by the worker threads that validate PRs in parallel, so every statement runs
+under a lock (SQLite connections are not safe for concurrent use).
 """
 
 from __future__ import annotations
@@ -11,6 +14,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
+import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -57,29 +62,44 @@ class StageStore:
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = str(path)
-        self._conn = sqlite3.connect(self.path, isolation_level=None)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
+
+    def _run(self, sql: str, params: Sequence[Any] = ()) -> None:
+        with self._lock:
+            self._conn.execute(sql, params)
+
+    def _all(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def _one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchone()
 
     # --- candidates ----------------------------------------------------------------------------
 
     def upsert_candidate(self, pr_number: int, data: dict[str, Any]) -> None:
-        self._conn.execute(
+        self._run(
             "INSERT INTO candidates(pr_number, data) VALUES (?, ?)"
             " ON CONFLICT(pr_number) DO UPDATE SET data = excluded.data",
             (pr_number, json.dumps(data, sort_keys=True)),
         )
 
     def candidates(self) -> list[tuple[int, dict[str, Any]]]:
-        rows = self._conn.execute("SELECT pr_number, data FROM candidates ORDER BY pr_number")
-        return [(int(r["pr_number"]), json.loads(r["data"])) for r in rows.fetchall()]
+        rows = self._all("SELECT pr_number, data FROM candidates ORDER BY pr_number")
+        return [(int(r["pr_number"]), json.loads(r["data"])) for r in rows]
 
     def candidate_count(self) -> int:
-        return int(self._conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
+        row = self._one("SELECT COUNT(*) FROM candidates")
+        return int(row[0]) if row else 0
 
     # --- stage results -------------------------------------------------------------------------
 
@@ -91,7 +111,7 @@ class StageStore:
         reason: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
-        self._conn.execute(
+        self._run(
             "INSERT INTO stage_results(pr_number, stage, outcome, reason, data, ts)"
             " VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(pr_number, stage) DO UPDATE SET outcome = excluded.outcome,"
@@ -109,10 +129,10 @@ class StageStore:
     def get_stage(
         self, pr_number: int, stage: str
     ) -> tuple[str, str | None, dict[str, Any]] | None:
-        row = self._conn.execute(
+        row = self._one(
             "SELECT outcome, reason, data FROM stage_results WHERE pr_number = ? AND stage = ?",
             (pr_number, stage),
-        ).fetchone()
+        )
         if row is None:
             return None
         data: dict[str, Any] = {} if row["data"] is None else json.loads(row["data"])
@@ -124,38 +144,38 @@ class StageStore:
 
     def passed(self, stage: str) -> list[int]:
         """PR numbers that finished ``stage`` with outcome ok, ascending."""
-        rows = self._conn.execute(
+        rows = self._all(
             "SELECT pr_number FROM stage_results WHERE stage = ? AND outcome = ?"
             " ORDER BY pr_number",
             (stage, OK),
         )
-        return [int(r["pr_number"]) for r in rows.fetchall()]
+        return [int(r["pr_number"]) for r in rows]
 
     def count(self, stage: str, outcome: str) -> int:
-        row = self._conn.execute(
+        row = self._one(
             "SELECT COUNT(*) FROM stage_results WHERE stage = ? AND outcome = ?", (stage, outcome)
-        ).fetchone()
-        return int(row[0])
+        )
+        return int(row[0]) if row else 0
 
     def drop_reasons(self, stage: str) -> dict[str, int]:
-        rows = self._conn.execute(
+        rows = self._all(
             "SELECT reason, COUNT(*) AS n FROM stage_results WHERE stage = ? AND outcome = ?"
             " GROUP BY reason ORDER BY n DESC, reason",
             (stage, DROPPED),
         )
-        return {str(r["reason"]): int(r["n"]) for r in rows.fetchall()}
+        return {str(r["reason"]): int(r["n"]) for r in rows}
 
     # --- mining progress -----------------------------------------------------------------------
 
     def slice_done(self, start: dt.date, end: dt.date) -> bool:
-        row = self._conn.execute(
+        row = self._one(
             "SELECT 1 FROM mine_slices WHERE slice_start = ? AND slice_end = ?",
             (start.isoformat(), end.isoformat()),
-        ).fetchone()
+        )
         return row is not None
 
     def mark_slice_done(self, start: dt.date, end: dt.date) -> None:
-        self._conn.execute(
+        self._run(
             "INSERT OR IGNORE INTO mine_slices(slice_start, slice_end) VALUES (?, ?)",
             (start.isoformat(), end.isoformat()),
         )
@@ -163,11 +183,11 @@ class StageStore:
     # --- key/value -----------------------------------------------------------------------------
 
     def get_kv(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        row = self._one("SELECT value FROM kv WHERE key = ?", (key,))
         return None if row is None else str(row["value"])
 
     def set_kv(self, key: str, value: str) -> None:
-        self._conn.execute(
+        self._run(
             "INSERT INTO kv(key, value) VALUES (?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),

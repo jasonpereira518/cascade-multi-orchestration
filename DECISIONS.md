@@ -225,3 +225,56 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
     import before the fix (structlog #761, #812: ~175 tests), every test in it counts as
     fail_to_pass by the "missing before" rule. Grading is equivalent, but those tasks are worth a
     glance during audit, since their F2P size says nothing about difficulty.
+
+## Phase 3 (scale, split, audit)
+
+54. **The split is a hash-ordered prefix of repos, frozen in `tasks/split.json`.** Repos are sorted by
+    SHA-256 of `salt:repo` (never Python's `hash()`, which is randomized per process; a test runs the
+    choice under three `PYTHONHASHSEED`s). The test set is the shortest prefix whose share of tasks is
+    closest to the target fraction (default 0.4), always leaving at least one repo in train. The
+    only inputs are repo names, task counts, the salt, and the target, so no outcome can influence it.
+    `freeze` refuses to overwrite; `--force` exists and is documented as invalidating results.
+55. **Repos that appear after the freeze get a hash bucket, appended, never recomputed.** A late repo
+    is test if `bucket(repo, salt) < target`, else train, and is recorded under `late_assignments` with
+    a timestamp. Existing assignments never change. `fitting_tasks` returns train tasks only and
+    refuses a manifest with any unsplit task, so fitting code cannot be handed unsplit data by mistake.
+56. **A repo-level split is coarse, and with this repo set it cannot hit 25-30 test tasks.** Click
+    supplies about 60% of the projected tasks. With the upper-bound counts (STATUS.md) the default salt
+    puts attrs and structlog in test, roughly 21% of tasks (about 13 of 60). Hitting 25-30 would need
+    click in test, which leaves train small. This is a human decision, left open in NEXT.md; nothing is
+    frozen until the real counts exist. Choosing a salt by looking at counts is allowed (counts are not
+    outcomes) but must be made once, logged here, and made before any result is seen.
+57. **The audit log is append-only and the latest line wins.** `tasks/audit.jsonl` is the source of
+    truth; a changed mind is another line, an interrupted session loses nothing, and skipping records
+    nothing. `cascade tasks finalize` copies the latest verdict into each task's `audit` field. Only
+    `ok` enters experiments (`experiment_tasks`). Tasks are shown in a hash order that mixes repos
+    (so fatigue does not fall on one repo), identical on every resume.
+58. **Audit hints are model-free and advisory.** Verbatim overlap between the fix and the issue (leak),
+    new public names that tests use but the issue never states (underspecified), literals the tests
+    assert that the issue never states (arbitrary), and a note on huge fail_to_pass sets (decision 53).
+    They are shown above the issue and are never verdicts; the 25-character minimum for a verbatim
+    line exists because short lines like `return x` appear in many issues by chance.
+59. **Difficulty features need no model and are recomputed at finalize.** Everything but
+    `test_runtime_s` is a deterministic function of the issue text, patches, and test id lists, so a
+    stale or hand-edited value cannot survive `finalize`. `test_runtime_s` is measured, so it is
+    preserved. Old manifest rows without the new fields still load (they default to zero).
+60. **Two-level parallelism, with one writer per shared file.** `run-all` runs repos in threads
+    (default 4) and, within a repo, PRs in threads (default 2). Each repo has its own state, clone, and
+    image; the shared SQLite store takes a lock per statement. The manifest merge and STATUS.md
+    refresh happen afterward in one thread, so workers never race on them. Results do not depend on the
+    degree of parallelism (a test compares serial and parallel runs). One repo failing is reported and
+    the others finish; finished rows from a failed repo are still merged.
+61. **The manifest merge keeps a task's split and audit.** Re-mining a repo replaces that repo's lines
+    only, and carries over each task's existing `split` and `audit`, so rerunning the pipeline can
+    never undo a human verdict or the frozen split. Consequence: `run-all`'s per-repo `PipelineSummary`
+    reports `manifest_tasks == 0` because the orchestrator, not the repo run, writes the manifest; the
+    report uses the attrition funnel instead.
+62. **Disabled repos are skipped by default.** `enabled: false` in `repos.yaml` (jinja, which is
+    dormant) excludes a repo from `run-all` unless `--repo` names it or `--include-disabled` is given.
+63. **Triage classifies from logged facts only, and has seen no real data.** `cascade triage` reads
+    the matrix and each attempt's `result.json` and labels it a pipeline bug, Verifier false positive
+    or negative, malformed model output, provider/config error, cap/kill switch, or genuine model
+    failure, with the evidence used, and flags leak-audit hits separately. Grading infrastructure
+    errors outrank everything (they are never blamed on the model). One mutant (the false-positive
+    branch also matching a case that already returned success) is equivalent and cannot be killed.
+

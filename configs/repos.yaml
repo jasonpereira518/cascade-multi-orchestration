@@ -30,6 +30,7 @@ repos:
   # --- added 2026-10-04 at the human's request. Each was built and its suite run offline in the
   # --- Docker image three times (all passing; outcomes stable except where a note says otherwise).
   - name: pallets/jinja
+    enabled: false   # dormant; see notes. `taskgen run-all` skips it unless --repo names it
     license: BSD-3-Clause
     python_version: "3.12.13"
     install_cmd: uv pip install --group tests -e .
