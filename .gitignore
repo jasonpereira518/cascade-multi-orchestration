@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.pyright/
+*.egg-info/
+dist/
+
+# Run artifacts (generated from logged runs; never hand-edited, never committed)
+runs/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.parquet
+
+# Budget kill switch (touch this file to halt all spend)
+KILL_SWITCH
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

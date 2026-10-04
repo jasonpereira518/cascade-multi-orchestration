@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uv sync --locked
+      - run: make check
+      - run: make smoke
+    env:
+      # CI never spends. The mock provider is the default and the spend gate stays closed.
+      CASCADE_ALLOW_SPEND: "0"

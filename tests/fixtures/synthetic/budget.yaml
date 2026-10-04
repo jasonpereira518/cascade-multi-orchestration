@@ -1,0 +1,6 @@
+# SYNTHETIC test budget. Invented caps. kill_switch_path is overridden per test.
+global_cap_usd: 1.0
+per_task_cap_usd: 0.5
+per_attempt_cap_usd: 0.1
+per_attempt_max_tokens: 20000
+kill_switch_path: KILL_SWITCH

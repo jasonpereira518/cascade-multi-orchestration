@@ -1,0 +1,10 @@
+# TODO(human): set the caps in USD, and the per-attempt token ceiling. Until all four are filled
+# the ledger refuses to start, so no run can spend. Caps must satisfy
+# per_attempt <= per_task <= global.
+global_cap_usd: TODO        # total ceiling across all runs recorded in the ledger
+per_task_cap_usd: TODO      # ceiling for one task across every arm and attempt
+per_attempt_cap_usd: TODO   # ceiling for one pipeline attempt (one arm on one task)
+per_attempt_max_tokens: TODO  # input + output + reasoning tokens for one attempt
+
+# Touch this file to halt all calls immediately (e.g. `touch KILL_SWITCH`). Gitignored.
+kill_switch_path: KILL_SWITCH

@@ -1,0 +1,32 @@
+# TODO(human): fill in every TODO before any non-mock run. `uv run cascade config-status` lists
+# what is left. Nothing here is a default: model names and prices come from you (hard rule 5).
+#
+# - name: the provider's model identifier, exactly as its docs list it.
+# - *_usd_per_mtok: USD per million tokens from the provider's current pricing page.
+# - reasoning_usd_per_mtok: leave null if reasoning tokens bill at the output price.
+# - knowledge_cutoff: from the provider docs. Task PRs must be merged AFTER the newest cutoff
+#   (see date_window in repos.yaml).
+# - reasoning_efforts: the effort values this model accepts; [] if it has no effort setting.
+#
+# An arm is (model, reasoning_effort) applied to the whole pipeline. Edit the arms freely; Tier 1
+# needs 3. The entries below are templates only.
+models:
+  - name: TODO-small
+    provider: openai
+    input_usd_per_mtok: TODO
+    output_usd_per_mtok: TODO
+    reasoning_usd_per_mtok: null
+    knowledge_cutoff: TODO
+    reasoning_efforts: [TODO-low, TODO-high]
+  - name: TODO-large
+    provider: openai
+    input_usd_per_mtok: TODO
+    output_usd_per_mtok: TODO
+    reasoning_usd_per_mtok: null
+    knowledge_cutoff: TODO
+    reasoning_efforts: [TODO-low, TODO-high]
+
+arms:
+  - {model: TODO-small, reasoning_effort: TODO-low}
+  - {model: TODO-large, reasoning_effort: TODO-low}
+  - {model: TODO-large, reasoning_effort: TODO-high}

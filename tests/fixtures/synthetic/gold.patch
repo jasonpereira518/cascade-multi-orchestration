@@ -1,0 +1,11 @@
+diff --git a/tinylib/clamp.py b/tinylib/clamp.py
+index 5565634..fa4568c 100644
+--- a/tinylib/clamp.py
++++ b/tinylib/clamp.py
+@@ -3,5 +3,5 @@ def clamp(value: float, low: float, high: float) -> float:
+     if value < low:
+         return low
+     if value > high:
+-        return low
++        return high
+     return value

@@ -1,0 +1,28 @@
+{
+  "task_id": "synthetic-tinylib-001",
+  "repo": "synthetic/tinylib",
+  "base_commit": "0000000000000000000000000000000000000000",
+  "issue_title": "clamp() returns the lower bound for values above the range",
+  "issue_body": "Calling clamp(42, 0, 10) returns 0, but I expected 10. Values below the range are handled correctly.",
+  "gold_patch": "diff --git a/tinylib/clamp.py b/tinylib/clamp.py\nindex 5565634..fa4568c 100644\n--- a/tinylib/clamp.py\n+++ b/tinylib/clamp.py\n@@ -3,5 +3,5 @@ def clamp(value: float, low: float, high: float) -> float:\n     if value < low:\n         return low\n     if value > high:\n-        return low\n+        return high\n     return value\n",
+  "test_patch": "diff --git a/tests/test_clamp.py b/tests/test_clamp.py\nindex 7bdb21a..41f068f 100644\n--- a/tests/test_clamp.py\n+++ b/tests/test_clamp.py\n@@ -7,3 +7,7 @@ def test_inside_range():\n \n def test_below_range():\n     assert clamp(-3, 0, 10) == 0\n+\n+\n+def test_above_range():\n+    assert clamp(42, 0, 10) == 10\n",
+  "fail_to_pass": [
+    "tests/test_clamp.py::test_above_range"
+  ],
+  "pass_to_pass": [
+    "tests/test_clamp.py::test_inside_range",
+    "tests/test_clamp.py::test_below_range"
+  ],
+  "image": "synthetic/tinylib:none",
+  "features": {
+    "src_files": 1,
+    "src_lines": 1,
+    "issue_chars": 158,
+    "test_runtime_s": 0.1
+  },
+  "split": null,
+  "audit": {
+    "status": "ok",
+    "notes": "synthetic fixture"
+  }
+}

@@ -1,0 +1,20 @@
+# SYNTHETIC test config. Mock identifiers and invented prices. Not real models, not real prices.
+models:
+  - name: mock-small
+    provider: mock
+    input_usd_per_mtok: 1.0
+    output_usd_per_mtok: 4.0
+    knowledge_cutoff: 2024-01-01
+    reasoning_efforts: [low, high]
+  - name: mock-large
+    provider: mock
+    input_usd_per_mtok: 10.0
+    output_usd_per_mtok: 40.0
+    reasoning_usd_per_mtok: 50.0
+    knowledge_cutoff: 2024-06-01
+    reasoning_efforts: [low, high]
+
+arms:
+  - {model: mock-small, reasoning_effort: low}
+  - {model: mock-large, reasoning_effort: low}
+  - {model: mock-large, reasoning_effort: high}

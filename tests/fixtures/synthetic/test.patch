@@ -1,0 +1,12 @@
+diff --git a/tests/test_clamp.py b/tests/test_clamp.py
+index 7bdb21a..41f068f 100644
+--- a/tests/test_clamp.py
++++ b/tests/test_clamp.py
+@@ -7,3 +7,7 @@ def test_inside_range():
+ 
+ def test_below_range():
+     assert clamp(-3, 0, 10) == 0
++
++
++def test_above_range():
++    assert clamp(42, 0, 10) == 10

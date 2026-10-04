@@ -1,0 +1,21 @@
+# TODO(human): pick the first repo and set the date window. Candidate criteria (docs/SPEC.md):
+# Python + pytest, permissive license, active, mid-popularity, installs without a GPU, test suite
+# under ~2 minutes.
+date_window:
+  # PRs must be merged after the newest arm's knowledge cutoff in models.yaml.
+  start: TODO   # YYYY-MM-DD
+  end: TODO     # YYYY-MM-DD
+
+limits:
+  min_source_files: 1
+  max_source_files: 5
+  max_source_lines: 150
+  max_test_runtime_s: 120
+
+repos:
+  - name: TODO-owner/TODO-repo   # GitHub owner/name
+    license: TODO                # SPDX id, must be permissive
+    python_version: TODO         # e.g. the minor version its CI uses
+    install_cmd: TODO            # runs at image build time (the sandbox has no network)
+    test_cmd: TODO               # pytest invocation used for fail_to_pass / pass_to_pass
+    notes: ""
