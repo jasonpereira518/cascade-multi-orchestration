@@ -71,3 +71,15 @@ repos:
     notes: >-
       Default branch is `dev`. 1190 tests in ~1.5 s. Six datetime tests embed the current time in
       their parametrize ids, so those node ids differ per run; the flake check drops them.
+
+# The draft-only live pilot (`cascade draft`) runs ONLY on repos listed here, and only drafts a patch
+# and PR text for human review: it never pushes, opens a PR, or comments. A repo listed here must also
+# be listed under `repos:` above (the draft needs its install and test commands; `enabled: false` is
+# fine). TODO(human): add the repos for 5-10 issues.
+#   status: owned    you own the repo
+#   status: opt_in   a maintainer agreed to AI-drafted fixes; maintainer_contact is REQUIRED and says
+#                    who agreed and where that is recorded (an email, an issue comment URL)
+# Examples (remove the leading # to use):
+#   - {name: you/your-repo, status: owned}
+#   - {name: org/project, status: opt_in, maintainer_contact: "Jane Doe agreed by email 2026-10-01"}
+pilot_repos: []

@@ -1,4 +1,99 @@
-# Next (STOP E): confirm the plan, then run the final evaluation once
+# Next (STOP F): run the live pilot, then generate the resume numbers
+
+Phase 6 built the draft-only pilot, the review log, `resume-stats`, `resume-bullets`, and the
+generated README and write-up. **Nothing was run on a real repo, issue, or model**: the pilot needs
+a real final evaluation (for its default policy) and your repos; the resume numbers need real
+artifacts. Without them every generator fails loudly, which is the intended behaviour
+(`STATUS.md`). Cascade never pushes, opens a PR, or comments; submitting is yours.
+
+## What must exist first (all still open)
+
+The final evaluation (`results/final/` and a committed `FINAL.lock.json`), which needs everything in
+the STOP E and STOP D sections below. `cascade resume-stats` refuses without it. `cascade draft` can
+run earlier if you pass `--policy` yourself, but then its cost is not tied to a designated policy.
+
+## Your steps, in order
+
+1. **Configure the pilot.**
+   - `configs/budget.yaml`: fill `buckets.live_pilot` (a few dollars per issue is plenty to start; the
+     buckets must still sum to at most `global_cap_usd`). Every draft is capped by it and its ledger
+     rows are tagged `purpose=live_pilot`.
+   - `configs/repos.yaml`: for each repo, add it under `repos:` (license, `python_version`,
+     `install_cmd`, `test_cmd`; `enabled: false` keeps mining off) **and** under `pilot_repos:` with
+     `status: owned`. Choose **5 to 10 issues on repos you own**.
+   - Environment: `GITHUB_TOKEN` as a fine-grained, **read-only** token (Issues: read; no write
+     scopes), `OPENAI_API_KEY`, `CASCADE_ALLOW_SPEND=1`, Docker running. A private repo also needs
+     git credentials you have set up yourself; Cascade does not handle them.
+
+2. **Ask a few maintainers of opt-in repos** whether they accept AI-drafted fixes before drafting
+   anything for them. Add the repo with `status: opt_in` and a `maintainer_contact` note saying who
+   agreed and where that is recorded (an email date, an issue comment URL). The config refuses an
+   `opt_in` repo with a blank note, and `cascade draft` refuses any repo not listed.
+
+3. **Dry-run the wiring once for $0** (mock provider; the output is canned, only the flow matters):
+
+```bash
+uv run cascade draft --repo owner/name --issue 123 --policy always_max
+```
+
+4. **Draft each issue for real** (the policy defaults to the one the final evaluation designated;
+   see `DECISIONS.md` 94, and pass `--policy` to override):
+
+```bash
+uv run cascade draft --repo owner/name --issue 123 --provider openai
+```
+
+   Each draft lands in `pilot/drafts/<owner__name>/<issue>/` (gitignored): `patch.diff`,
+   `PR_DESCRIPTION.md` (with the AI-assistance disclosure), `draft.json`. Re-run with `--force` to
+   replace one.
+
+5. **Review every draft honestly**: read the diff, run the project's tests, then record it. The
+   outcome is `accepted_as_is`, `minor_edits` (give `--lines-edited`, the number of lines you
+   changed), or `rejected`. Rejected drafts count against the accept rate and their cost counts
+   toward cost per accepted draft; do not skip them.
+
+```bash
+uv run cascade review --repo owner/name --issue 123 --outcome minor_edits --lines-edited 4 --notes "renamed a variable"
+```
+
+6. **Submit any accepted drafts yourself**, keeping the disclosure in the PR text. When one is
+   merged (or declined), record it by reviewing again with `--merged` or `--not-merged` (the latest
+   row per draft wins; the log is append-only).
+
+7. **Compute and generate**:
+
+```bash
+uv run cascade pilot-metrics                  # accept rate, merge rate, median lines edited, cost per accepted draft
+uv run cascade export                         # refresh the ledger export so it includes the pilot spend
+uv run cascade resume-stats                   # artifacts/resume_stats.json (fails loudly if an input is missing)
+uv run cascade resume-bullets                 # docs/resume_bullets.md, with a character count per bullet
+uv run python scripts/make_readme_results.py  # the generated results block of README.md
+uv run python scripts/make_writeup.py         # docs/WRITEUP.md
+```
+
+   `resume-stats` checks the final lock's matrix hash, so if `export` changed `matrix.parquet`
+   bytes it will say so; tell me before doing anything about it. Commit the generated files.
+
+8. **Paste the bullets and counts into the chat** (the `resume-bullets` output and
+   `artifacts/resume_stats.json`'s `tasks`, `attempts`, `tokens`, `spend_usd`, and `pilot`). Nothing
+   should go on a resume before we have read them together, including a bullet flagged outside its
+   character limit.
+
+## Decisions I need from you
+
+1. **The rounding convention** (`DECISIONS.md` 99): favorable figures are truncated, unfavorable ones
+   are rounded up. The brief says "never round up"; I read that as "never flatter".
+2. **The wording of the templates.** "turns GitHub issues into test-verified PRs" and "AI-drafted PRs
+   accepted" describe patches a human submitted. Use them only if that is how it happened.
+3. **"Cost per resolved issue" in the bullets** is the point-estimate reduction; the plan's headline
+   interval is cost per task (`DECISIONS.md` 98). Both are in `resume_stats.json`.
+4. **How a policy is "designated"** (`DECISIONS.md` 94): the MET primary policy, else always-max.
+5. A bullet that comes out over its limit, or more than 15 characters under it, is flagged, never
+   edited. If the matrix bullet lands one character over, tell me which words to change.
+
+---
+
+# Prerequisite: the final evaluation (STOP E, still open)
 
 Nothing in Phase 5 touched a real matrix or the test split: there is no real matrix yet (see "Before
 step 1"). Everything was built and tested on a labeled-synthetic dataset. Four things are yours, in

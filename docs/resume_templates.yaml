@@ -1,0 +1,30 @@
+# Resume bullet templates. `cascade resume-bullets` fills these from artifacts/resume_stats.json and
+# writes docs/resume_bullets.md. Placeholders are {name}; every one must come from the stats file.
+# Limits (characters, spaces included): one_line <= 119, two_line <= 239. The generator FLAGS any
+# rendered bullet outside its limit or more than 15 characters under it; it never edits wording.
+two_line:
+  pipeline: >-
+    Built a 6-agent pipeline (triage, reproduce, localize, patch, review, verify) with OpenAI Agents
+    SDK that turns GitHub issues into test-verified PRs, benchmarked on {n_tasks} post-cutoff
+    hidden-test tasks from {n_repos} repos in sandboxed Docker
+  router_supported: >-
+    Designed a cost-aware router (cascade and learned policies) choosing model and reasoning effort
+    per issue, cutting cost per resolved issue {cost_cut_pct}% vs an always-max-effort baseline at
+    equal resolve rate, capturing {oracle_share_pct}% of oracle savings
+  router_neutral: >-
+    Evaluated cost-aware routing across {n_arms} model and effort arms on {n_tasks} post-cutoff
+    issues, mapping the cost-accuracy frontier with paired bootstrap CIs; cascade routing cut cost
+    {cost_cut_pct}% vs always-max at a {rr_gap_pts}-point lower resolve rate
+one_line:
+  matrix: >-
+    Cached a {n_attempts}-attempt outcome matrix to replay routing policies offline, scored with
+    bootstrap CIs on ${spend_usd} of API spend
+  verifier: >-
+    Isolated an LLM-free test Verifier from the patcher, measuring a {verifier_fp_pct}%
+    false-positive rate that bounds cascade savings
+  leakage: >-
+    Blocked eval leakage via network-off Docker sandboxes, truncated git history, and a frozen
+    repo-level train/test split
+  pilot: >-
+    Piloted on {n_pilot} real issues across {n_pilot_repos} repos with human review: {n_accepted}
+    AI-drafted PRs accepted as-is or with minor edits

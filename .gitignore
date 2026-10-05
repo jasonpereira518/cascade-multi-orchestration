@@ -31,3 +31,4 @@ KILL_SWITCH
 .vscode/
 # dev evaluation outputs (FINAL.lock.json is NOT ignored: it is committed)
 results/
+pilot/drafts/

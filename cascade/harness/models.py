@@ -44,6 +44,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from cascade.errors import CascadeError
 from cascade.harness.ledger import (
     DEFAULT_BUCKET,
+    EXPERIMENT_PURPOSE,
     FLEX_TIER,
     STANDARD_TIER,
     CallContext,
@@ -66,6 +67,7 @@ class AttemptRef:
     arm_id: str
     bucket: str = DEFAULT_BUCKET
     tier: str = STANDARD_TIER
+    purpose: str = EXPERIMENT_PURPOSE
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,7 @@ class MeteredModel(Model):
             role=self._role,
             bucket=a.bucket,
             tier=a.tier,
+            purpose=a.purpose,
         )
 
     async def get_response(

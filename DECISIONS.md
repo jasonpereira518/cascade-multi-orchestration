@@ -448,3 +448,73 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
     provenance stamp is printed on the figure. Dev outputs go to `results/dev/<source>-<hash>/`
     (gitignored); the final outputs go to `results/final/` and the lock is at the repo root, tracked.
 
+
+## Phase 6: live pilot, resume stats, README
+
+91. **The draft command refuses before it does anything.** Order: the repo must be listed under
+    `pilot_repos` (owned, or opt_in with a non-blank `maintainer_contact`, which the config schema also
+    enforces at load time), then defined under `repos:` with filled install and test commands, then
+    `buckets.live_pilot` must exist, then the policy must be valid. All four happen before any network
+    call, model call, ledger write, or file write; a test asserts that a refusal leaves no ledger file and
+    no drafts directory. The CLI checks the allow-list before it even reads models.yaml or budget.yaml.
+92. **Read-only, by construction.** The issue reader is a single GET of
+    `/repos/{owner}/{repo}/issues/{n}` through a transport that takes only a URL and refuses any URL
+    outside api.github.com; there is no body, no other method, no write scope requested. `GITHUB_TOKEN`
+    (optional, read-only) is read from the environment and sent only as a bearer header. The only other
+    network use is a read-only `git clone`/`fetch` of the repo. A test greps the pilot modules for write
+    verbs and endpoints. A private owned repo needs git credentials you have configured yourself; Cascade
+    does not handle them.
+93. **Live-pilot spend is tagged and capped.** Every ledger row gets `purpose` (`experiment` default,
+    `live_pilot` for drafts); drafts run in the `live_pilot` bucket, so the existing bucket cap applies.
+    Older ledger files migrate in place (`purpose` defaults to `experiment`). `resume-stats` splits spend
+    by purpose, and the matrix bullet uses the experiment spend only.
+94. **The designated policy.** The brief says the draft default is "the policy the final eval
+    designated" but not how a policy is designated. Rule (in `evals/designate.py`; it changes nothing the
+    evaluation computes): of the plan's two primary policies, `cascade` and `predictive_issue`, the one
+    whose final verdict is MET (non-inferior AND a saving), the larger point cost reduction winning a
+    tie; if neither is MET, `always_max`, because nothing was shown to beat the baseline. An INCONCLUSIVE
+    result therefore designates the baseline, on purpose. `cascade draft` without `--policy` needs a
+    completed final evaluation whose output hashes and (when checked) matrix hash still match the lock.
+95. **Live cascade and predictive drafts.** `cascade` tries cheap, mid, max in order and stops at the
+    first arm the Verifier confirms, or at a kill switch or cap; the draft is the last arm's patch and
+    its description says plainly when the Verifier did NOT confirm it. `predictive_issue` fits the
+    issue-features router on TRAIN only (as the final evaluation does) and computes features from the
+    live issue text alone; no gold-derived feature is used (a test checks that they are zero).
+96. **Review log.** `tasks/pilot_reviews.jsonl` is append-only; the latest row per (repo, issue) wins, so
+    "merged upstream" can be added later without rewriting history. Arms tried and cost are copied from
+    the draft's `draft.json` at review time (ledger-derived), so `pilot-metrics` needs only the log.
+    Definitions, printed with the output: accepted = accepted_as_is or minor_edits; accept rate with a
+    Wilson interval; merge rate over accepted drafts with `merged_upstream` recorded (unset is excluded,
+    not counted as unmerged); median lines edited over accepted drafts; cost per accepted draft includes
+    the cost of rejected drafts. Unreviewed drafts on disk are listed and excluded.
+97. **`resume-stats` inputs and refusals.** Reads only artifacts: the final results and lock (output
+    hashes and the matrix hash must match the lock), the matrix and ledger exports, the manifest and
+    audit log (the audited test count must equal the lock's, so a later edit is caught), the pilot log,
+    and, if present, the matching dev analysis for the noise estimate. No timestamps, so a rerun on
+    unchanged inputs is byte-identical; it records the SHA-256 of every input. A missing input is an
+    error naming it. Synthetic data is refused unless `--allow-synthetic`, which tests use and which
+    stamps everything SYNTHETIC. Two task counts are kept: audited (manifest) and evaluated (final); the
+    repo count is only reported when they agree.
+98. **What "cost cut" means in a bullet.** The templates say "cost per resolved issue", but the plan's
+    headline (and the only quantity with an interval) is cost per task. Stats keep both: the headline
+    interval, and the cost-per-resolved reduction from the point estimates, which is what the bullets use.
+    A bullet carries no interval; the README does.
+99. **Never flattering.** A figure that makes the result look better (cost cut, share of oracle savings,
+    a resolve-rate advantage) is truncated toward zero at one decimal; one that makes it look worse
+    (resolve-rate gap, false-positive rate, spend at the cent) is rounded up. Counts are exact. All in
+    exact decimal arithmetic (0.29 is 29.0, not 28.9). The brief says "never round up"; for the
+    unfavorable figures, rounding up is the conservative direction, so it is used there. Say so if you
+    want truncation everywhere.
+100. **Bullet gating.** `router_supported` only when the designated policy's verdict is MET; otherwise
+    `router_neutral` about cascade, which flips to "higher" if cascade resolved more and to "the same
+    resolve rate" at exactly zero, and is not rendered if cascade did not cut cost. A template renders
+    only if every metric exists. Added rule: the pilot bullet is not rendered with zero accepted drafts.
+    Limits are flagged (over, or more than 15 under), never fixed by editing the wording. The output
+    carries standing wording checks: the templates say "PRs" but Cascade drafts patches, and "equal
+    resolve rate" means non-inferior within the margin.
+101. **README and write-up are generated, prose is not.** The README results block between the markers
+    and `docs/WRITEUP.md` come from `resume_stats.json` plus models.yaml (arm knowledge cutoffs) and
+    repos.yaml (task window); the hand-written limitations refer to a generated "facts" block instead of
+    quoting numbers, and a test asserts the write-up template contains no number of its own. `--check`
+    fails if a generated file was edited by hand. The committed README holds a generated "no results
+    yet" block until real artifacts exist.

@@ -277,6 +277,28 @@ class RepoSpec(_Strict):
     notes: str = ""
 
 
+PilotStatus = Literal["owned", "opt_in"]
+
+
+class PilotRepo(_Strict):
+    """A repo the draft-only live pilot may run on. Anything not listed is refused."""
+
+    name: str  # owner/name
+    status: PilotStatus  # owned: the human owns it; opt_in: a maintainer agreed to AI-drafted fixes
+    # For opt_in repos: who agreed, when, and how (an email thread, an issue comment). Required.
+    maintainer_contact: str = ""
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def _opt_in_needs_a_contact(self) -> PilotRepo:
+        if self.status == "opt_in" and not self.maintainer_contact.strip():
+            raise ValueError(
+                f"pilot repo {self.name!r} is opt_in and needs a maintainer_contact note "
+                "(who agreed to AI-drafted fixes, and where that is recorded)"
+            )
+        return self
+
+
 class ResolvedRepo(_Strict):
     """One repo's job parameters with every TODO filled in."""
 
@@ -300,6 +322,14 @@ class ReposConfig(_Strict):
     date_window: DateWindow
     limits: SelectionLimits = Field(default_factory=SelectionLimits)
     repos: list[RepoSpec]
+    # Repos the live pilot may draft fixes for (owned or opt_in). Empty means the pilot is off.
+    pilot_repos: list[PilotRepo] = Field(default_factory=lambda: [])
+
+    def pilot_repo(self, name: str) -> PilotRepo | None:
+        return next((r for r in self.pilot_repos if r.name == name), None)
+
+    def spec(self, name: str) -> RepoSpec | None:
+        return next((r for r in self.repos if r.name == name), None)
 
     def unfilled(self) -> list[str]:
         return find_todos(self)

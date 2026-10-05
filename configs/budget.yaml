@@ -21,6 +21,7 @@ buckets:
   matrix: TODO
   ablate: TODO
   repeat: TODO
+  live_pilot: TODO   # cascade draft (draft-only live pilot); its calls are also tagged purpose=live_pilot
 
 # Per-arm per-attempt dollar caps, keyed by arm label (or arm id). Each must be <= per_attempt_cap_usd.
 # An attempt that reaches its cap is recorded as a failed cell with the cost it incurred.

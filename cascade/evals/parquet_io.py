@@ -39,3 +39,8 @@ def read_rows(path: Path, task_ids: Collection[str]) -> list[dict[str, Any]]:
 
 def row_count(path: Path) -> int:
     return int(pq.ParquetFile(path).metadata.num_rows)
+
+
+def column_names(path: Path) -> list[str]:
+    """The file's column names, read from the schema alone."""
+    return list(pq.ParquetFile(path).schema_arrow.names)

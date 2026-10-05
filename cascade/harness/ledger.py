@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS calls (
     cached_tokens INTEGER NOT NULL DEFAULT 0,
     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     processing_tier TEXT NOT NULL DEFAULT 'standard',
-    bucket TEXT NOT NULL DEFAULT 'default'
+    bucket TEXT NOT NULL DEFAULT 'default',
+    purpose TEXT NOT NULL DEFAULT 'experiment'
 );
 CREATE INDEX IF NOT EXISTS idx_calls_task ON calls(task_id);
 CREATE INDEX IF NOT EXISTS idx_calls_attempt ON calls(task_id, attempt_id);
@@ -68,10 +69,13 @@ _ADDED_COLUMNS = (
     ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("processing_tier", "TEXT NOT NULL DEFAULT 'standard'"),
     ("bucket", "TEXT NOT NULL DEFAULT 'default'"),
+    ("purpose", "TEXT NOT NULL DEFAULT 'experiment'"),
 )
 STANDARD_TIER = "standard"
 FLEX_TIER = "flex"
 DEFAULT_BUCKET = "default"
+EXPERIMENT_PURPOSE = "experiment"
+LIVE_PILOT_PURPOSE = "live_pilot"
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ class CallContext:
     role: str
     bucket: str = DEFAULT_BUCKET
     tier: str = STANDARD_TIER
+    purpose: str = EXPERIMENT_PURPOSE
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,7 @@ class CallRecord(BaseModel):
     cache_write_tokens: Annotated[int, Field(ge=0)] = 0
     processing_tier: str = STANDARD_TIER
     bucket: str = DEFAULT_BUCKET
+    purpose: str = EXPERIMENT_PURPOSE
 
 
 def _long_context_multiples(p: Prices, input_tokens: int) -> tuple[float, float]:
@@ -303,13 +309,14 @@ class Ledger:
             cache_write_tokens=usage.cache_write_tokens,
             processing_tier=ctx.tier,
             bucket=ctx.bucket,
+            purpose=ctx.purpose,
         )
         try:
             self._conn.execute(
                 "INSERT INTO calls VALUES (:call_id, :ts, :run_id, :task_id, :attempt_id, :arm_id,"
                 " :role, :provider, :model, :input_tokens, :output_tokens, :reasoning_tokens,"
                 " :cost_usd, :latency_s, :status, :error, :cached_tokens, :cache_write_tokens,"
-                " :processing_tier, :bucket)",
+                " :processing_tier, :bucket, :purpose)",
                 rec.model_dump(),
             )
         except sqlite3.IntegrityError as e:
