@@ -3,8 +3,17 @@
 # under ~2 minutes.
 date_window:
   # PRs must be merged after the newest arm's knowledge cutoff in models.yaml.
-  start: TODO   # YYYY-MM-DD
-  end: TODO     # YYYY-MM-DD
+  # start = newest arm cutoff (Luna, 2026-05-18) + 30 days = 2026-06-17: the 30-day margin guards
+  # against a cutoff that is fuzzy or a model that has seen early post-cutoff material.
+  start: 2026-06-17
+  end: 2026-09-20
+
+# Used ONLY with `cascade taskgen run --relaxed-window` (or run-all). No margin: the day after the
+# cutoff. More tasks, more contamination risk; tasks are tagged with the window they were mined
+# under, and state lives in a separate directory per window, so the two are never mixed.
+relaxed_date_window:
+  start: 2026-05-19
+  end: 2026-09-20
 
 limits:
   min_source_files: 1

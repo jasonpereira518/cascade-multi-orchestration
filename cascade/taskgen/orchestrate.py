@@ -29,8 +29,10 @@ from cascade.taskgen.pipeline import (
     PipelineDeps,
     PipelineSummary,
     build_tasks,
+    mined_window,
     refresh_status,
     run_pipeline,
+    state_dir,
 )
 from cascade.taskgen.store import ENV, FILTER, PATCH, VALIDATE, StageStore
 
@@ -46,7 +48,7 @@ class RepoOutcome:
 
 
 def state_path(runs_dir: Path, repo: ResolvedRepo) -> Path:
-    return runs_dir / repo.slug / "state.sqlite"
+    return state_dir(runs_dir, repo) / "state.sqlite"
 
 
 def run_all(
@@ -83,7 +85,14 @@ def run_all(
         store = StageStore(path)
         try:
             if manifest_path is not None and stop_after == VALIDATE:
-                merge_repo_tasks(manifest_path, build_tasks(store, repo), repo.name)
+                deps = deps_for(repo)
+                merge_repo_tasks(
+                    manifest_path,
+                    build_tasks(store, repo, deps.cutoffs if deps else None),
+                    repo.name,
+                    window=mined_window(repo),
+                    replace_window=bool(deps and deps.replace_window),
+                )
             if status_md is not None:
                 refresh_status(store, repo, status_md)
         finally:

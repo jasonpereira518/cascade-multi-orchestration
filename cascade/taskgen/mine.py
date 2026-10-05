@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 import datetime as dt
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from cascade.config import ResolvedRepo
@@ -79,12 +80,15 @@ def mine(
     repo: ResolvedRepo,
     *,
     today: dt.date | None = None,
-) -> MineStats:
+    on_slice: Callable[[int, int], None] | None = None,
+) -> MineStats:  # on_slice(slices handled so far, PRs seen so far)
     today = today or dt.datetime.now(dt.UTC).date()
     fetched = skipped = seen = 0
     for start, end in month_slices(repo.window_start, repo.window_end):
         if store.slice_done(start, end):
             skipped += 1
+            if on_slice:
+                on_slice(fetched + skipped, seen)
             continue
         after: str | None = None
         while True:
@@ -109,6 +113,8 @@ def mine(
                 break
             after = page["endCursor"]
         fetched += 1
+        if on_slice:
+            on_slice(fetched + skipped, seen)
         if end < today:  # a slice that includes today may still gain PRs; refetch it next time
             store.mark_slice_done(start, end)
     return MineStats(slices_fetched=fetched, slices_skipped=skipped, prs_seen=seen)

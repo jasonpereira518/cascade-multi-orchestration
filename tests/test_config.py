@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +44,8 @@ def test_shipped_configs_load_and_report_todos() -> None:
     assert "models[0].input_usd_per_mtok" in models.unfilled()
     assert "models[0].input_usd_per_mtok" in models.unfilled()
     assert "global_cap_usd" in budget.unfilled()
-    assert "date_window.start" in repos.unfilled()
-    # click's repo-specific fields are filled; only the human-owned date window remains.
+    # the human has filled the windows; click's repo-specific fields are filled too
+    assert "date_window.start" not in repos.unfilled() and repos.relaxed_date_window is not None
     assert [u for u in repos.unfilled() if u.startswith("repos[")] == []
 
 
@@ -141,9 +142,13 @@ def test_load_models_from_path_roundtrip(tmp_path: Path) -> None:
 
 
 def test_repo_resolve_requires_window_and_named_repo() -> None:
-    repos = load_repos(CONFIGS / "repos.yaml")
+    from cascade.config import DateWindow
+
+    repos = load_repos(CONFIGS / "repos.yaml").model_copy(
+        update={"date_window": DateWindow(start="TODO", end="TODO")}
+    )
     with pytest.raises(ConfigNotFilledError) as exc:
-        repos.resolve("pallets/click")  # date window is still TODO in the shipped config
+        repos.resolve("pallets/click")
     assert "date_window.start" in exc.value.paths
     with pytest.raises(ValueError, match="not listed"):
         repos.resolve("nobody/nothing")
@@ -217,3 +222,42 @@ def test_the_shipped_repos_all_load_and_the_license_override_reaches_the_resolve
     )
     assert filled.resolve("hynek/structlog").github_license_id == "NOASSERTION"
     assert filled.resolve("pallets/click").github_license_id is None
+
+
+def test_the_relaxed_window_is_used_only_when_asked() -> None:
+    repos = load_repos(CONFIGS / "repos.yaml")
+    std, relaxed = repos.resolve("pallets/click"), repos.resolve("pallets/click", relaxed=True)
+    assert (std.window_start.isoformat(), std.window_kind) == ("2026-06-17", "standard")
+    assert (relaxed.window_start.isoformat(), relaxed.window_kind) == ("2026-05-19", "relaxed")
+    assert std.window_end == relaxed.window_end and std.window_key != relaxed.window_key
+    assert std.window_key == "2026-06-17_2026-09-20"
+
+
+def test_relaxed_without_a_relaxed_window_configured_is_an_error() -> None:
+    repos = load_repos(CONFIGS / "repos.yaml").model_copy(update={"relaxed_date_window": None})
+    with pytest.raises(ValueError, match="needs relaxed_date_window"):
+        repos.resolve("pallets/click", relaxed=True)
+
+
+def test_an_unfilled_or_inverted_relaxed_window_is_refused() -> None:
+    from cascade.config import DateWindow
+
+    base = load_repos(CONFIGS / "repos.yaml")
+    todo = base.model_copy(update={"relaxed_date_window": DateWindow(start="TODO", end="TODO")})
+    with pytest.raises(ConfigNotFilledError) as exc:
+        todo.resolve("pallets/click", relaxed=True)
+    assert "relaxed_date_window.start" in exc.value.paths
+    inverted = DateWindow(start=dt.date(2026, 10, 1), end=dt.date(2026, 9, 1))
+    with pytest.raises(ValueError, match=r"relaxed_date_window\.start must be on or before"):
+        base.model_copy(update={"relaxed_date_window": inverted}).resolve(
+            "pallets/click", relaxed=True
+        )
+
+
+def test_the_shipped_standard_window_is_the_cutoff_plus_thirty_days() -> None:
+    repos = load_repos(CONFIGS / "repos.yaml")
+    assert repos.date_window.start == dt.date(2026, 5, 18) + dt.timedelta(days=30)
+    assert repos.date_window.end == dt.date(2026, 9, 20)
+    assert repos.relaxed_date_window is not None
+    assert repos.relaxed_date_window.start == dt.date(2026, 5, 19)  # the day after the cutoff
+    assert repos.relaxed_date_window.end == repos.date_window.end

@@ -10,16 +10,19 @@ One place for every write, so three things stay consistent:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cascade.errors import CascadeError
 from cascade.taskgen import audit as audit_mod
 from cascade.taskgen import split as split_mod
+from cascade.taskgen.cutoffs import clearance
 from cascade.taskgen.features import compute_features
-from cascade.taskgen.schema import Audit, Task
+from cascade.taskgen.schema import Audit, MinedWindow, Task
 
 _PRESERVED = ("split", "audit")
 
@@ -49,14 +52,46 @@ def write_tasks(path: Path, tasks: Sequence[Task]) -> None:
     _write_rows(path, {t.task_id: json.loads(t.model_dump_json()) for t in tasks})
 
 
-def merge_repo_tasks(path: Path, new_tasks: Sequence[Task], repo_name: str) -> None:
-    """Replace this repo's lines; keep every other repo's lines and any existing split/audit."""
+class WindowMixError(CascadeError):
+    """The manifest holds this repo's tasks from a different date window."""
+
+
+def merge_repo_tasks(
+    path: Path,
+    new_tasks: Sequence[Task],
+    repo_name: str,
+    *,
+    window: MinedWindow | None = None,
+    replace_window: bool = False,
+) -> None:
+    """Replace this repo's lines; keep every other repo's lines and any existing split/audit.
+
+    With ``window`` given, refuse to replace tasks that were mined under a different recorded
+    window unless ``replace_window``: replacing would silently discard audited tasks.
+    """
     rows: dict[str, dict[str, Any]] = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 row = json.loads(line)
                 rows[row["task_id"]] = row
+    if window is not None and not replace_window:
+        mine = window.model_dump(mode="json")
+
+        def label(w: dict[str, Any]) -> str:
+            return f"{w['start']}..{w['end']} ({w['kind']})"
+
+        other = {
+            label(r["mined_window"])
+            for r in rows.values()
+            if r["repo"] == repo_name and r.get("mined_window") and r["mined_window"] != mine
+        }
+        if other:
+            raise WindowMixError(
+                f"{path} has {repo_name} tasks mined under {', '.join(sorted(other))}, not "
+                f"{window.start}..{window.end} ({window.kind}). Replacing them would discard that "
+                "work (audits included); pass --replace-window to do it anyway."
+            )
     kept = {k: r for k, r in rows.items() if r["repo"] != repo_name}
     for task in new_tasks:
         row = json.loads(task.model_dump_json())
@@ -78,9 +113,15 @@ class FinalizeResult:
 
 
 def finalize_manifest(
-    manifest_path: Path, split_path: Path, audit_path: Path, *, assign_new: bool = True
+    manifest_path: Path,
+    split_path: Path,
+    audit_path: Path,
+    *,
+    assign_new: bool = True,
+    cutoffs: Mapping[str, dt.date | None] | None = None,
 ) -> FinalizeResult:
-    """Stamp split, audit status, and recomputed features onto every task. Idempotent."""
+    """Stamp split, audit status, recomputed features, and (if ``cutoffs``) which arms' knowledge
+    cutoffs each task clears onto every task. Idempotent."""
     tasks = read_manifest(manifest_path)
     split = split_mod.read_split(split_path)
     new_repos: list[str] = []
@@ -102,7 +143,10 @@ def finalize_manifest(
             test_runtime_s=t.features.test_runtime_s,
         )  # fmt: skip
         audit = Audit(status=v.verdict, notes=v.notes) if v else Audit(status="pending", notes="")
-        finalized.append(t.model_copy(update={"features": features, "audit": audit}))
+        update: dict[str, Any] = {"features": features, "audit": audit}
+        if cutoffs is not None:
+            update["cutoff_clearance"] = clearance(t.merged_at, cutoffs)
+        finalized.append(t.model_copy(update=update))
     write_tasks(manifest_path, finalized)
 
     by_split: dict[str, int] = {}

@@ -1,20 +1,27 @@
 """Orchestrates mine -> filter -> patch -> env -> validate for one repo, resumably.
 
 Every stage reads and writes the SQLite StageStore, so rerunning skips every PR whose stage result
-is final (ok or dropped) and retries only "error" rows. The state is tied to a fingerprint of the
-repo config; changing the window, limits, or commands against an old state is refused rather than
-mixing results from two configurations.
+is final (ok or dropped) and retries only "error" rows. State lives in a directory keyed by the
+date window (``<repo>/w-<start>_<end>/``), so mining under two windows can never share or mix rows;
+the clone is shared because git data does not depend on the window. The state is also tied to a
+fingerprint of the repo config; changing limits or commands against an old state is refused.
+
+Every run appends to ``runs.jsonl`` in the state directory (window, kind, stages, timeouts), reports
+live progress through ``deps.progress``, and gives each PR a wall-clock budget per stage
+(``deps.pr_timeout_s``): a PR that exceeds it is skipped, logged, and retried on the next run.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import re
 import shutil
+import threading
 import uuid
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +40,7 @@ from cascade.taskgen.build_env import (
     docker_available,
     image_exists,
 )
+from cascade.taskgen.cutoffs import clearance
 from cascade.taskgen.features import compute_features
 from cascade.taskgen.filter import FilterContext, filter_metadata
 from cascade.taskgen.github import GitHubClient, PRCandidate
@@ -44,13 +52,15 @@ from cascade.taskgen.gitrepo import (
     ensure_clone,
 )
 from cascade.taskgen.manifest import merge_repo_tasks
-from cascade.taskgen.mine import check_repo, mine
+from cascade.taskgen.mine import check_repo, mine, month_slices
 from cascade.taskgen.results import ERROR as OUTCOME_ERROR
-from cascade.taskgen.schema import Audit, Task
+from cascade.taskgen.schema import Audit, MinedWindow, Task
 from cascade.taskgen.store import DROPPED, ENV, ERROR, FILTER, OK, PATCH, VALIDATE, StageStore
 from cascade.taskgen.validate import PATCH_APPLY_FAILED, TestExecutor, validate_task
 
 STAGE_ORDER = ("mine", FILTER, PATCH, ENV, VALIDATE)
+DEFAULT_PR_TIMEOUT_S = 900.0  # 3 validation runs at the 120 s test cap, plus setup, with headroom
+PR_TIMEOUT = "pr_timeout"
 ENV_COLLECT_FAILED = "env_collect_failed"
 ENV_NO_TESTS = "env_no_tests"
 
@@ -70,6 +80,13 @@ class PipelineDeps:
     clone_url: Callable[[str], str] = lambda repo: f"https://github.com/{repo}.git"
     executor_factory: Callable[[str, Path], TestExecutor] | None = None
     today: dt.date | None = None
+    # Wall-clock budget per PR per stage (patch, env, validate); None disables it.
+    pr_timeout_s: float | None = DEFAULT_PR_TIMEOUT_S
+    # progress(repo, stage, done, total, validated_so_far); called from worker threads.
+    progress: Callable[[str, str, int, int, int], None] | None = None
+    # arm id -> knowledge cutoff, for tagging tasks (see taskgen.cutoffs). Empty: no tags.
+    cutoffs: Mapping[str, dt.date | None] = field(default_factory=lambda: {})
+    replace_window: bool = False  # allow replacing manifest tasks mined under another window
 
 
 @dataclass
@@ -99,6 +116,98 @@ def _candidate(data: dict[str, Any]) -> PRCandidate:
     return PRCandidate.model_validate(data)
 
 
+def state_dir(runs_dir: Path, repo: ResolvedRepo) -> Path:
+    return runs_dir / repo.slug / f"w-{repo.window_key}"
+
+
+def mined_window(repo: ResolvedRepo) -> MinedWindow:
+    return MinedWindow(start=repo.window_start, end=repo.window_end, kind=repo.window_kind)
+
+
+class RunLog:
+    """Append-only JSONL record of what each run did (window, stages, skipped PRs)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def event(self, **fields: Any) -> None:
+        line = {"ts": dt.datetime.now(dt.UTC).isoformat(), **fields}
+        with self._lock, self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, sort_keys=True, default=str) + "\n")
+
+
+@dataclass
+class Tracker:
+    """Reports progress for one stage of one repo; ``done`` counts PRs finished or skipped."""
+
+    deps: PipelineDeps
+    store: StageStore
+    repo: str
+    stage: str
+    total: int
+    done: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def tick(self) -> None:
+        with self._lock:
+            self.done += 1
+            done = self.done
+        if self.deps.progress is not None:
+            self.deps.progress(
+                self.repo, self.stage, done, self.total, self.store.count(VALIDATE, OK)
+            )
+
+
+def _with_timeout(
+    fn: Callable[[int], str | None],
+    number: int,
+    *,
+    timeout_s: float | None,
+    on_timeout: Callable[[int], str | None],
+) -> str | None:
+    """Run ``fn(number)``; if it exceeds ``timeout_s`` give up on it and call ``on_timeout``.
+
+    A Python thread cannot be killed, so the abandoned call is left to finish in a daemon thread.
+    Its late result (if any) is still correct data for that PR; what matters is that the run
+    moves on instead of hanging.
+    """
+    if timeout_s is None:
+        return fn(number)
+    box: list[str | None] = []
+    failure: list[BaseException] = []
+    abandoned = threading.Event()
+
+    def target() -> None:
+        try:
+            box.append(fn(number))
+        except BaseException as e:
+            if not abandoned.is_set():  # nobody is waiting any more (the store may be closed)
+                failure.append(e)
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        abandoned.set()
+        return on_timeout(number)
+    if failure:
+        raise failure[0]
+    return box[0]
+
+
+def _skip_on_timeout(
+    store: StageStore, log: RunLog | None, stage: str, timeout_s: float | None
+) -> Callable[[int], str | None]:
+    def skip(number: int) -> str | None:
+        store.put_stage(number, stage, ERROR, PR_TIMEOUT, {"timeout_s": timeout_s})
+        if log is not None:
+            log.event(event=PR_TIMEOUT, stage=stage, pr=number, timeout_s=timeout_s)
+        return f"PR {number} {stage}: skipped after {timeout_s:g}s (retried on rerun)"
+
+    return skip
+
+
 def run_filter(store: StageStore, repo: ResolvedRepo, default_branch: str) -> None:
     ctx = FilterContext(
         window_start=repo.window_start,
@@ -114,34 +223,67 @@ def run_filter(store: StageStore, repo: ResolvedRepo, default_branch: str) -> No
         store.put_stage(number, FILTER, DROPPED if reason else OK, reason)
 
 
-def run_patch(store: StageStore, repo: ResolvedRepo, clone: Path, url: str) -> None:
+def run_patch(
+    store: StageStore,
+    repo: ResolvedRepo,
+    clone: Path,
+    url: str,
+    deps: PipelineDeps | None = None,
+    log: RunLog | None = None,
+) -> list[str]:
+    """Derive gold and test patches per PR. Returns retryable messages (timeouts)."""
+    deps = deps or PipelineDeps()
     todo = [n for n in store.passed(FILTER) if not store.is_final(n, PATCH)]
     if not todo:
-        return
+        return []
     ensure_clone(url, clone)
     cands = dict(store.candidates())
+    track = Tracker(deps, store, repo.name, PATCH, len(todo))
+    skipped: list[str] = []
+
+    def one(number: int) -> str | None:
+        _patch_one(store, repo, clone, cands, number)
+        return None
+
     for number in todo:
-        try:
-            outcome = derive_patches(clone, _candidate(cands[number]), repo.limits)
-        except GitError as e:
-            store.put_stage(number, PATCH, ERROR, "git_error", {"message": str(e)})
-            continue
-        if outcome.data is None:
-            store.put_stage(number, PATCH, DROPPED, outcome.reason)
-        else:
-            d = outcome.data
-            store.put_stage(
-                number,
-                PATCH,
-                OK,
-                data={
-                    "base_commit": d.base_commit,
-                    "gold_patch": d.gold_patch,
-                    "test_patch": d.test_patch,
-                    "src_files": d.src_files,
-                    "src_lines": d.src_lines,
-                },
-            )
+        msg = _with_timeout(
+            one, number, timeout_s=deps.pr_timeout_s,
+            on_timeout=_skip_on_timeout(store, log, PATCH, deps.pr_timeout_s),
+        )  # fmt: skip
+        if msg:
+            skipped.append(msg)
+        track.tick()
+    return skipped
+
+
+def _patch_one(
+    store: StageStore,
+    repo: ResolvedRepo,
+    clone: Path,
+    cands: dict[int, dict[str, Any]],
+    number: int,
+) -> None:
+    try:
+        outcome = derive_patches(clone, _candidate(cands[number]), repo.limits)
+    except GitError as e:
+        store.put_stage(number, PATCH, ERROR, "git_error", {"message": str(e)})
+        return
+    if outcome.data is None:
+        store.put_stage(number, PATCH, DROPPED, outcome.reason)
+    else:
+        d = outcome.data
+        store.put_stage(
+            number,
+            PATCH,
+            OK,
+            data={
+                "base_commit": d.base_commit,
+                "gold_patch": d.gold_patch,
+                "test_patch": d.test_patch,
+                "src_files": d.src_files,
+                "src_lines": d.src_lines,
+            },
+        )
 
 
 def _workspace_factory(
@@ -197,6 +339,7 @@ def run_env_and_validate(
     *,
     do_validate: bool,
     jobs: int = 1,
+    log: RunLog | None = None,
 ) -> list[str]:
     errors: list[str] = []
     pending_env = [n for n in store.passed(PATCH) if not store.is_final(n, ENV)]
@@ -213,17 +356,27 @@ def run_env_and_validate(
         )
     cap = float(repo.limits.max_test_runtime_s)
 
-    def env_one(number: int) -> str | None:
-        return _env_check(store, clone, work, executor, cap, number)
+    def stage(name: str, numbers: list[int], work_fn: Callable[[int], str | None]) -> list[str]:
+        track = Tracker(deps, store, repo.name, name, len(numbers))
 
-    def validate_one(number: int) -> str | None:
-        return _validate_one(store, clone, work, executor, cap, number)
+        def guarded(number: int) -> str | None:
+            try:
+                return _with_timeout(
+                    work_fn, number, timeout_s=deps.pr_timeout_s,
+                    on_timeout=_skip_on_timeout(store, log, name, deps.pr_timeout_s),
+                )  # fmt: skip
+            finally:
+                track.tick()
 
-    errors += _run_parallel(pending_env, env_one, jobs)
+        return _run_parallel(numbers, guarded, jobs)
+
+    errors += stage(ENV, pending_env, lambda n: _env_check(store, clone, work, executor, cap, n))
     if not do_validate:
         return errors
     to_validate = [n for n in store.passed(ENV) if not store.is_final(n, VALIDATE)]
-    errors += _run_parallel(to_validate, validate_one, jobs)
+    errors += stage(
+        VALIDATE, to_validate, lambda n: _validate_one(store, clone, work, executor, cap, n)
+    )
     return errors
 
 
@@ -237,7 +390,7 @@ def _run_parallel(numbers: list[int], fn: Callable[[int], str | None], jobs: int
         results = [fn(n) for n in numbers]
     else:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            results = list(pool.map(fn, numbers))
+            results = [f.result() for f in as_completed([pool.submit(fn, n) for n in numbers])]
     return [r for r in results if r]
 
 
@@ -315,9 +468,12 @@ def _validate_one(
     return None
 
 
-def build_tasks(store: StageStore, repo: ResolvedRepo) -> list[Task]:
+def build_tasks(
+    store: StageStore, repo: ResolvedRepo, cutoffs: Mapping[str, dt.date | None] | None = None
+) -> list[Task]:
     image = store.get_kv("image_tag") or ""
     cands = dict(store.candidates())
+    window = mined_window(repo)
     tasks: list[Task] = []
     for number in store.passed(VALIDATE):
         cand = _candidate(cands[number])
@@ -346,14 +502,24 @@ def build_tasks(store: StageStore, repo: ResolvedRepo) -> list[Task]:
                     test_runtime_s=vd["test_runtime_s"],
                 ),
                 audit=Audit(status="pending"),
+                mined_window=window,
+                merged_at=cand.merged_at,
+                cutoff_clearance=clearance(cand.merged_at, cutoffs or {}),
             )
         )
     return tasks
 
 
-def write_manifest(path: Path, tasks: list[Task], repo_name: str) -> None:
+def write_manifest(
+    path: Path,
+    tasks: list[Task],
+    repo_name: str,
+    *,
+    window: MinedWindow | None = None,
+    replace_window: bool = False,
+) -> None:
     """Rewrite this repo's lines in the manifest; other repos, splits, and audits are kept."""
-    merge_repo_tasks(path, tasks, repo_name)
+    merge_repo_tasks(path, tasks, repo_name, window=window, replace_window=replace_window)
 
 
 def refresh_status(store: StageStore, repo: ResolvedRepo, status_md: Path) -> None:
@@ -382,33 +548,53 @@ def run_pipeline(
         raise ValueError(f"stop_after must be one of {STAGE_ORDER}")
     deps = deps or PipelineDeps()
     root = runs_dir / repo.slug
-    store = StageStore(root / "state.sqlite")
+    state = state_dir(runs_dir, repo)
+    store = StageStore(state / "state.sqlite")
+    log = RunLog(state / "runs.jsonl")
+    log.event(
+        event="run_start", repo=repo.name, window=[repo.window_start, repo.window_end],
+        window_kind=repo.window_kind, stop_after=stop_after, jobs=jobs,
+        pr_timeout_s=deps.pr_timeout_s,
+    )  # fmt: skip
     summary = PipelineSummary(stage_reached="none")
     reach = STAGE_ORDER.index(stop_after)
     try:
         _check_fingerprint(store, repo)
         meta = check_repo(deps.client_factory(), repo)
         store.set_kv("default_branch", meta.default_branch)
-        mine(deps.client_factory(), store, repo, today=deps.today)
+        slices = len(month_slices(repo.window_start, repo.window_end))
+
+        def on_slice(done: int, seen: int) -> None:
+            if deps.progress is not None:
+                deps.progress(repo.name, "mine", done, slices, store.count(VALIDATE, OK))
+
+        mine(deps.client_factory(), store, repo, today=deps.today, on_slice=on_slice)
         summary.stage_reached = "mine"
         if reach >= 1:
             run_filter(store, repo, meta.default_branch)
             summary.stage_reached = FILTER
-        clone = root / "clone.git"
+        clone = root / "clone.git"  # shared across windows: git data does not depend on them
         if reach >= 2:
-            run_patch(store, repo, clone, deps.clone_url(repo.name))
+            summary.errors += run_patch(store, repo, clone, deps.clone_url(repo.name), deps, log)
             summary.stage_reached = PATCH
         if reach >= 3:
             errs = run_env_and_validate(
-                store, repo, clone, root / "work", deps, do_validate=reach >= 4, jobs=jobs
+                store, repo, clone, state / "work", deps, do_validate=reach >= 4, jobs=jobs, log=log
             )
             summary.errors += errs
             summary.stage_reached = VALIDATE if reach >= 4 else ENV
         if reach >= 4 and manifest_path is not None:
-            tasks = build_tasks(store, repo)
-            write_manifest(manifest_path, tasks, repo.name)
+            tasks = build_tasks(store, repo, deps.cutoffs)
+            write_manifest(
+                manifest_path, tasks, repo.name, window=mined_window(repo),
+                replace_window=deps.replace_window,
+            )  # fmt: skip
             summary.manifest_tasks = len(tasks)
     finally:
+        log.event(
+            event="run_end", stage_reached=summary.stage_reached, retryable=len(summary.errors),
+            validated=store.count(VALIDATE, OK),
+        )  # fmt: skip
         if status_md is not None:
             refresh_status(store, repo, status_md)
         store.close()

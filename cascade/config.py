@@ -311,15 +311,23 @@ class ResolvedRepo(_Strict):
     github_license_id: str | None = None
     window_start: dt.date
     window_end: dt.date
+    window_kind: Literal["standard", "relaxed"] = "standard"
     limits: SelectionLimits
 
     @property
     def slug(self) -> str:
         return self.name.replace("/", "__")
 
+    @property
+    def window_key(self) -> str:
+        """Names the state directory, so mining under two windows can never share state."""
+        return f"{self.window_start.isoformat()}_{self.window_end.isoformat()}"
+
 
 class ReposConfig(_Strict):
     date_window: DateWindow
+    # Looser start, used ONLY when the human passes --relaxed-window (never picked automatically).
+    relaxed_date_window: DateWindow | None = None
     limits: SelectionLimits = Field(default_factory=SelectionLimits)
     repos: list[RepoSpec]
     # Repos the live pilot may draft fixes for (owned or opt_in). Empty means the pilot is off.
@@ -337,22 +345,29 @@ class ReposConfig(_Strict):
     def enabled_repos(self) -> list[str]:
         return [r.name for r in self.repos if r.enabled]
 
-    def resolve(self, name: str) -> ResolvedRepo:
+    def resolve(self, name: str, *, relaxed: bool = False) -> ResolvedRepo:
         """Return the named repo's parameters, or raise if any field it needs is still TODO.
 
         Only the date window and the named repo are checked; other repos may stay unfilled.
+        ``relaxed`` swaps in ``relaxed_date_window``; it is never chosen on its own.
         """
         spec = next((r for r in self.repos if r.name == name), None)
         if spec is None:
             raise ValueError(f"repo {name!r} is not listed in repos.yaml")
-        todos = find_todos(self.date_window, "date_window") + find_todos(spec, f"repos[{name}]")
+        window = self.date_window
+        if relaxed:
+            if self.relaxed_date_window is None:
+                raise ValueError("--relaxed-window needs relaxed_date_window in repos.yaml")
+            window = self.relaxed_date_window
+        label = "relaxed_date_window" if relaxed else "date_window"
+        todos = find_todos(window, label) + find_todos(spec, f"repos[{name}]")
         if todos:
             raise ConfigNotFilledError(todos)
-        start, end = self.date_window.start, self.date_window.end
+        start, end = window.start, window.end
         if isinstance(start, str) or isinstance(end, str):  # unreachable: TODOs raised above
             raise ConfigNotFilledError(["date_window"])
         if start > end:
-            raise ValueError("date_window.start must be on or before date_window.end")
+            raise ValueError(f"{label}.start must be on or before {label}.end")
         return ResolvedRepo(
             name=spec.name,
             license=spec.license,
@@ -363,6 +378,7 @@ class ReposConfig(_Strict):
             github_license_id=spec.github_license_id,
             window_start=start,
             window_end=end,
+            window_kind="relaxed" if relaxed else "standard",
             limits=self.limits,
         )
 

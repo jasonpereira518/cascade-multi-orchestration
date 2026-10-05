@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from typing import Annotated, Literal
 
@@ -54,6 +55,14 @@ class Audit(_Strict):
     notes: str = ""
 
 
+class MinedWindow(_Strict):
+    """The date window a task was mined under (recorded so windows are never mixed)."""
+
+    start: dt.date
+    end: dt.date
+    kind: Literal["standard", "relaxed"]
+
+
 class Task(_Strict):
     task_id: str
     repo: str
@@ -69,6 +78,12 @@ class Task(_Strict):
     # None until the frozen split (by hash and by repo) assigns it.
     split: Literal["train", "test"] | None = None
     audit: Audit = Field(default_factory=Audit)
+    # Provenance, all optional so older manifests still load. Never shown to agents (AgentView).
+    mined_window: MinedWindow | None = None
+    merged_at: dt.datetime | None = None
+    # arm id -> True if the PR was merged AFTER that arm's knowledge cutoff, False if not, None if
+    # the cutoff is not filled in models.yaml. Restamped by `cascade tasks finalize`.
+    cutoff_clearance: dict[str, bool | None] = Field(default_factory=lambda: {})
 
     @field_validator("base_commit")
     @classmethod

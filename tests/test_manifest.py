@@ -231,3 +231,31 @@ def test_repos_are_enabled_by_default_and_the_flag_disables_them(tmp_path: Path)
     cfg = load_repos(path)
     assert cfg.enabled_repos() == ["o/a", "o/c"]
     assert cfg.resolve("o/b").name == "o/b"  # a disabled repo can still be named explicitly
+
+
+def test_finalize_retags_which_cutoffs_each_task_clears(tmp_path: Path) -> None:
+    from cascade.taskgen.cutoffs import clearance
+
+    manifest, split, audit = _setup(tmp_path)
+    tasks = read_manifest(manifest)
+    merged = {
+        tasks[0].task_id: dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+        tasks[1].task_id: dt.datetime(2026, 5, 18, 12, tzinfo=dt.UTC),  # on the cutoff day
+    }
+    write_tasks(
+        manifest, [t.model_copy(update={"merged_at": merged.get(t.task_id)}) for t in tasks]
+    )
+    cutoffs = {"a@low": dt.date(2026, 5, 18), "b@high": None}
+
+    finalize_manifest(manifest, split, audit, cutoffs=cutoffs)
+    by_id = {t.task_id: t for t in read_manifest(manifest)}
+    assert by_id[tasks[0].task_id].cutoff_clearance == {"a@low": True, "b@high": None}
+    assert by_id[tasks[1].task_id].cutoff_clearance == {"a@low": False, "b@high": None}
+    assert by_id[tasks[2].task_id].cutoff_clearance == {"a@low": None, "b@high": None}  # no date
+    assert clearance(None, cutoffs) == {"a@low": None, "b@high": None}
+
+    first = manifest.read_text()
+    finalize_manifest(manifest, split, audit, cutoffs=cutoffs)
+    assert manifest.read_text() == first  # idempotent
+    finalize_manifest(manifest, split, audit)  # no cutoffs given: existing tags are kept
+    assert manifest.read_text() == first

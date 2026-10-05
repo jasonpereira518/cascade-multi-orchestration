@@ -25,6 +25,7 @@ from cascade.taskgen import attrition
 from cascade.taskgen import audit as audit_mod
 from cascade.taskgen import split as split_mod
 from cascade.taskgen.build_env import DockerUnavailableError, docker_available
+from cascade.taskgen.cutoffs import arm_cutoffs
 from cascade.taskgen.github import TOKEN_ENV
 from cascade.taskgen.manifest import finalize_manifest, read_manifest
 from cascade.taskgen.orchestrate import (
@@ -34,7 +35,14 @@ from cascade.taskgen.orchestrate import (
     repo_funnel,
     run_all,
 )
-from cascade.taskgen.pipeline import STAGE_ORDER, run_pipeline
+from cascade.taskgen.pipeline import (
+    DEFAULT_PR_TIMEOUT_S,
+    STAGE_ORDER,
+    PipelineDeps,
+    run_pipeline,
+    state_dir,
+)
+from cascade.taskgen.runtime import ProgressPrinter, check_docker, check_github
 from cascade.taskgen.schema import Task
 from cascade.taskgen.store import StageStore
 
@@ -80,6 +88,48 @@ def config_status(
 _ConfigsDir = Annotated[Path, typer.Option(help="Directory holding the config YAMLs.")]
 _RunsDir = Annotated[Path, typer.Option(help="Where per-repo state, clones and workspaces live.")]
 _StatusMd = Annotated[Path, typer.Option(help="File whose attrition block is refreshed.")]
+_Relaxed = Annotated[
+    bool,
+    typer.Option(
+        "--relaxed-window",
+        help="Use relaxed_date_window from repos.yaml (more tasks, more contamination risk).",
+    ),
+]
+_ReplaceWindow = Annotated[
+    bool,
+    typer.Option(help="Replace manifest tasks mined under a different window (discards audits)."),
+]
+_PrTimeout = Annotated[
+    float,
+    typer.Option(help="Seconds per PR per stage before it is skipped and logged (0 = no limit)."),
+]
+
+
+def _pipeline_deps(
+    configs_dir: Path, *, pr_timeout: float, replace_window: bool, printer: ProgressPrinter
+) -> PipelineDeps:
+    """Deps for a real run: live progress, per-PR timeouts, and knowledge-cutoff tags."""
+    try:
+        cutoffs = arm_cutoffs(load_models(configs_dir / "models.yaml"))
+    except (CascadeError, ValueError, OSError) as e:
+        printer.note(f"warning: models.yaml unreadable ({e}); tasks get no cutoff tags")
+        cutoffs = {}
+    unknown = sorted(arm for arm, c in cutoffs.items() if c is None)
+    if unknown:
+        printer.note(
+            "warning: knowledge_cutoff is still TODO for "
+            + ", ".join(unknown)
+            + "; those arms are tagged unknown (null). `cascade tasks finalize` retags later."
+        )
+    return PipelineDeps(
+        pr_timeout_s=pr_timeout or None, progress=printer, cutoffs=cutoffs,
+        replace_window=replace_window,
+    )  # fmt: skip
+
+
+def _window_line(r: object) -> str:
+    start, end, kind = r.window_start, r.window_end, r.window_kind  # type: ignore[attr-defined]
+    return f"window: {start} to {end} ({kind}); state in w-{start}_{end}/"
 
 
 @taskgen_app.command("run")
@@ -94,16 +144,26 @@ def taskgen_run(
     stop_after: Annotated[
         str, typer.Option(help=f"Last stage to run: {', '.join(STAGE_ORDER)}.")
     ] = "validate",
+    relaxed_window: _Relaxed = False,
+    replace_window: _ReplaceWindow = False,
+    pr_timeout: _PrTimeout = DEFAULT_PR_TIMEOUT_S,
+    jobs: Annotated[int, typer.Option(help="PRs in parallel.")] = DEFAULT_JOBS,
 ) -> None:
     """Run the task pipeline for one repo. Safe to rerun: finished PRs are skipped."""
+    printer = ProgressPrinter()
     try:
-        resolved = load_repos(configs_dir / "repos.yaml").resolve(repo)
+        resolved = load_repos(configs_dir / "repos.yaml").resolve(repo, relaxed=relaxed_window)
+        typer.echo(_window_line(resolved), err=True)
         summary = run_pipeline(
             resolved,
             runs_dir=runs_dir,
             manifest_path=manifest,
             status_md=status_md,
             stop_after=stop_after,
+            deps=_pipeline_deps(
+                configs_dir, pr_timeout=pr_timeout, replace_window=replace_window, printer=printer
+            ),
+            jobs=jobs,
         )
     except CascadeError as e:
         typer.echo(f"error: {e}", err=True)
@@ -111,6 +171,16 @@ def taskgen_run(
     typer.echo(f"reached stage: {summary.stage_reached}; manifest tasks: {summary.manifest_tasks}")
     for message in summary.errors:
         typer.echo(f"retry on rerun: {message}", err=True)
+
+
+@taskgen_app.command("check")
+def taskgen_check() -> None:
+    """Check that GITHUB_TOKEN works (one read-only query) and that Docker is running."""
+    results = [check_github(), check_docker()]
+    for r in results:
+        typer.echo(f"{'OK  ' if r.ok else 'FAIL'} {r.name}: {r.detail}")
+    if not all(r.ok for r in results):
+        raise typer.Exit(1)
 
 
 @taskgen_app.command("attrition")
@@ -121,14 +191,15 @@ def taskgen_attrition(
     status_md: Annotated[
         Path | None, typer.Option(help="If given, refresh the attrition block in this file.")
     ] = None,
+    relaxed_window: _Relaxed = False,
 ) -> None:
     """Print the attrition table computed from the saved state (no network, no docker)."""
     try:
-        resolved = load_repos(configs_dir / "repos.yaml").resolve(repo)
+        resolved = load_repos(configs_dir / "repos.yaml").resolve(repo, relaxed=relaxed_window)
     except CascadeError as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(2) from e
-    state = runs_dir / resolved.slug / "state.sqlite"
+    state = state_dir(runs_dir, resolved) / "state.sqlite"
     if not state.exists():
         typer.echo(f"error: no state at {state}; run `cascade taskgen run` first", err=True)
         raise typer.Exit(2)
@@ -333,6 +404,9 @@ def taskgen_run_all(
     runs_dir: _RunsDir = Path("runs/taskgen"),
     manifest: _Manifest = Path("tasks/manifest.jsonl"),
     status_md: _StatusMd = Path("STATUS.md"),
+    relaxed_window: _Relaxed = False,
+    replace_window: _ReplaceWindow = False,
+    pr_timeout: _PrTimeout = DEFAULT_PR_TIMEOUT_S,
 ) -> None:
     """Run the task pipeline over many repos in parallel. Resumable: rerun to continue."""
     if not os.environ.get(TOKEN_ENV):
@@ -345,7 +419,13 @@ def taskgen_run_all(
             names = [r.name for r in cfg.repos]
         else:
             names = cfg.enabled_repos()
-        resolved = [cfg.resolve(n) for n in names]
+        resolved = [cfg.resolve(n, relaxed=relaxed_window) for n in names]
+        if resolved:
+            typer.echo(_window_line(resolved[0]), err=True)
+        printer = ProgressPrinter()
+        deps = _pipeline_deps(
+            configs_dir, pr_timeout=pr_timeout, replace_window=replace_window, printer=printer
+        )
         outcomes = run_all(
             resolved,
             runs_dir=runs_dir,
@@ -354,6 +434,7 @@ def taskgen_run_all(
             stop_after=stop_after,
             workers=workers,
             jobs=jobs,
+            deps_for=lambda _repo: deps,
         )
         funnels = [f for r in resolved if (f := repo_funnel(r, runs_dir)) is not None]
         typer.echo(format_report(funnels, outcomes=outcomes))
@@ -368,11 +449,12 @@ def taskgen_report(
     configs_dir: _ConfigsDir = Path("configs"),
     runs_dir: _RunsDir = Path("runs/taskgen"),
     manifest: _Manifest = Path("tasks/manifest.jsonl"),
+    relaxed_window: _Relaxed = False,
 ) -> None:
     """Per-stage attrition and per-repo task counts from saved state (no network, no Docker)."""
     try:
         cfg = load_repos(configs_dir / "repos.yaml")
-        resolved = [cfg.resolve(r.name) for r in cfg.repos]
+        resolved = [cfg.resolve(r.name, relaxed=relaxed_window) for r in cfg.repos]
         tasks = read_manifest(manifest)
     except (CascadeError, ValueError) as e:
         raise _fail(str(e)) from e
@@ -384,6 +466,8 @@ def taskgen_report(
         key = t.split or "unassigned"
         side[key] = side.get(key, 0) + 1
     missing = [r.name for r in resolved if r.name not in have]
+    if resolved:
+        typer.echo(_window_line(resolved[0]) + "\n")
     typer.echo(format_report(funnels, missing=missing, split_counts=split_counts))
 
 
@@ -454,10 +538,17 @@ def tasks_finalize(
     assign_new: Annotated[
         bool, typer.Option(help="Assign repos added after the freeze by hash bucket.")
     ] = True,
+    configs_dir: _ConfigsDir = Path("configs"),
 ) -> None:
-    """Stamp the frozen split, audit verdicts and recomputed model-free features on the manifest."""
+    """Stamp split, audit verdicts, features and knowledge-cutoff tags on the manifest."""
     try:
-        result = finalize_manifest(manifest, split_file, audit_file, assign_new=assign_new)
+        try:
+            cutoffs = arm_cutoffs(load_models(configs_dir / "models.yaml"))
+        except (CascadeError, ValueError, OSError):
+            cutoffs = None  # no readable models.yaml: leave existing tags untouched
+        result = finalize_manifest(
+            manifest, split_file, audit_file, assign_new=assign_new, cutoffs=cutoffs
+        )
     except (CascadeError, ValueError) as e:
         raise _fail(str(e)) from e
     typer.echo(f"{result.tasks} task(s) finalized")
