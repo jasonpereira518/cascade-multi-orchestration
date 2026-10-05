@@ -1,32 +1,74 @@
 # TODO(human): fill in every TODO before any non-mock run. `uv run cascade config-status` lists
-# what is left. Nothing here is a default: model names and prices come from you (hard rule 5).
+# what is left. Model names and arm definitions below are from the human's Phase 4 brief; every
+# price, cutoff, and pricing rule is still yours to fill from the provider's pricing page (hard
+# rule 5: nothing here is a guess, nothing is defaulted).
 #
 # - name: the provider's model identifier, exactly as its docs list it.
 # - *_usd_per_mtok: USD per million tokens from the provider's current pricing page.
 # - reasoning_usd_per_mtok: leave null if reasoning tokens bill at the output price.
+# - cached_input_usd_per_mtok / cache_write_usd_per_mtok: only if the provider bills them
+#   differently from plain input; otherwise leave unset (cached tokens then bill as input, which
+#   can only overstate cost).
+# - long_context_threshold_tokens + long_context_input_multiplier + long_context_output_multiplier:
+#   only if the provider charges more for a call whose input exceeds a size. A call over the
+#   threshold then bills input and output at those multiples. Unset means no such rule.
+# - flex_multiplier: the price multiple for service_tier=flex (the brief expects 0.5), set ONLY after
+#   confirming on the pricing page that the model supports flex. null means flex is unavailable.
 # - knowledge_cutoff: from the provider docs. Task PRs must be merged AFTER the newest cutoff
 #   (see date_window in repos.yaml).
 # - reasoning_efforts: the effort values this model accepts; [] if it has no effort setting.
 #
-# An arm is (model, reasoning_effort) applied to the whole pipeline. Edit the arms freely; Tier 1
-# needs 3. The entries below are templates only.
+# An arm is (model, reasoning effort) applied to the whole pipeline. `label` is the short role name
+# budget.yaml and the CLI use. Arms are run cheapest-first in the order listed. An `optional: true`
+# arm NEVER runs unless you add `enabled: true` to it.
 models:
-  - name: TODO-small
+  - name: gpt-6-luna
     provider: openai
     input_usd_per_mtok: TODO
     output_usd_per_mtok: TODO
     reasoning_usd_per_mtok: null
     knowledge_cutoff: TODO
-    reasoning_efforts: [TODO-low, TODO-high]
-  - name: TODO-large
+    reasoning_efforts: [low, high]
+    # cached_input_usd_per_mtok: TODO
+    # long_context_threshold_tokens: TODO
+    # long_context_input_multiplier: TODO
+    # long_context_output_multiplier: TODO
+    flex_multiplier: null
+  - name: gpt-6.1-sol
     provider: openai
     input_usd_per_mtok: TODO
     output_usd_per_mtok: TODO
     reasoning_usd_per_mtok: null
     knowledge_cutoff: TODO
-    reasoning_efforts: [TODO-low, TODO-high]
+    reasoning_efforts: [medium, high]
+    # cached_input_usd_per_mtok: TODO
+    # long_context_threshold_tokens: TODO
+    # long_context_input_multiplier: TODO
+    # long_context_output_multiplier: TODO
+    flex_multiplier: null
+  # Models for the optional arms below. Names are unknown to me: TODO(human) replace or delete.
+  - name: TODO-swap-in-cheap
+    provider: openai
+    input_usd_per_mtok: TODO
+    output_usd_per_mtok: TODO
+    knowledge_cutoff: TODO
+    reasoning_efforts: []
+  - name: TODO-astra
+    provider: openai
+    input_usd_per_mtok: TODO
+    output_usd_per_mtok: TODO
+    knowledge_cutoff: TODO
+    reasoning_efforts: []
 
 arms:
-  - {model: TODO-small, reasoning_effort: TODO-low}
-  - {model: TODO-large, reasoning_effort: TODO-low}
-  - {model: TODO-large, reasoning_effort: TODO-high}
+  - {label: cheap, model: gpt-6-luna, reasoning_effort: low}
+  - {label: mid, model: gpt-6-luna, reasoning_effort: high}
+  - {label: max, model: gpt-6.1-sol, reasoning_effort: medium}
+  # Optional arms: never run unless `enabled: true` is added by the human.
+  # swap_in_cheap: the replacement cheap arm if calibration finds the cheap arm near 0%.
+  # TODO(human): its model and effort are not defined in the brief.
+  - {label: swap_in_cheap, model: TODO-swap-in-cheap, optional: true}
+  # sol_high_ref: assumed from its name to be gpt-6.1-sol at effort high. TODO(human): confirm.
+  - {label: sol_high_ref, model: gpt-6.1-sol, reasoning_effort: high, optional: true}
+  # astra_ref: a reference arm on an "astra" model. TODO(human): the model is not defined.
+  - {label: astra_ref, model: TODO-astra, optional: true}

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openai-agents==0.23.1",
+    "pyarrow==25.0.1",
     "pydantic==2.13.5",
     "pyyaml==6.0.3",
     "typer==0.27.2",

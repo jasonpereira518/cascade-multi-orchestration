@@ -40,7 +40,7 @@ def test_shipped_configs_load_and_report_todos() -> None:
     models = load_models(CONFIGS / "models.yaml")
     budget = load_budget(CONFIGS / "budget.yaml")
     repos = load_repos(CONFIGS / "repos.yaml")
-    assert "models[0].name" in models.unfilled()
+    assert "models[0].input_usd_per_mtok" in models.unfilled()
     assert "models[0].input_usd_per_mtok" in models.unfilled()
     assert "global_cap_usd" in budget.unfilled()
     assert "date_window.start" in repos.unfilled()

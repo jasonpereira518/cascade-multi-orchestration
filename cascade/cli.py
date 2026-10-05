@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 
+from cascade import matrix_cli
 from cascade.agents import runner as agent_runner
 from cascade.agents.pipeline import PipelineConfig
 from cascade.agents.triage import format_triage, triage_runs
@@ -533,3 +534,6 @@ def triage_command(
 ) -> None:
     """Classify finished attempts: pipeline bug, Verifier issue, or genuine model failure."""
     typer.echo(format_triage(triage_runs(runs_dir)))
+
+
+matrix_cli.register(app)  # preflight, pilot, size, calibrate, matrix, ablate, ...

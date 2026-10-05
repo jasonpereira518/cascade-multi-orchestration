@@ -20,11 +20,34 @@ def row(**over: Any) -> MatrixRow:
     return MatrixRow(**{**base, **over})
 
 
-def test_rows_carry_exactly_the_spec_fields() -> None:
+def test_rows_carry_the_spec_fields_plus_the_phase_4_fields() -> None:
     assert list(MatrixRow.model_fields) == [
         "task_id", "arm_id", "seed", "true_success", "verifier_claimed", "cost_usd", "input_tokens",
         "output_tokens", "reasoning_tokens", "wall_s", "turns", "patch_sha", "pipeline_config", "error",
+        "model", "reasoning_effort", "processing_tier", "cached_tokens", "cache_write_tokens",
+        "started_at",
     ]  # fmt: skip
+
+
+def test_rows_written_before_phase_4_still_load_with_defaults() -> None:
+    legacy = row().model_dump()
+    for key in ("model", "reasoning_effort", "processing_tier", "cached_tokens",
+                "cache_write_tokens", "started_at"):  # fmt: skip
+        legacy.pop(key)
+    loaded = MatrixRow.model_validate(legacy)
+    assert loaded.processing_tier == "standard" and loaded.cached_tokens == 0
+    assert loaded.model == "" and loaded.started_at == ""
+
+
+def test_delete_removes_only_the_named_cell() -> None:
+    store = MatrixStore(":memory:")
+    a, b = row(), row(arm_id="m@high")
+    store.put(a)
+    store.put(b)
+    store.delete(a.task_id, a.arm_id, a.seed, a.config_id)
+    assert store.rows() == [b]
+    store.delete("nope", "nope", 0, "x")  # deleting a missing cell is a no-op
+    assert store.rows() == [b]
 
 
 def test_put_get_roundtrip_and_upsert() -> None:

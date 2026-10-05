@@ -189,7 +189,7 @@ def test_unfilled_shipped_configs_are_refused_with_the_fields_named() -> None:
             "--task",
             "t",
             "--arm",
-            "TODO-small@TODO-low",
+            "gpt-6-luna@low",
             "--configs-dir",
             str(ROOT / "configs"),
         ],

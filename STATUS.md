@@ -1,17 +1,94 @@
 # Status
 
-**Stage:** STOP C (Phase 3: scale, split, audit) reached. Halted for the human; see `NEXT.md`.
+**Stage:** STOP D (Phase 4: matrix runner, sizing, calibration, ablations) reached. Halted for the human; see `NEXT.md`.
 **Updated:** 2026-10-04
 
-**Acceptance (Phase 3):** audit CLI built and tested, split deterministic and tested, difficulty
-features computed without a model, per-stage attrition and per-repo counts printable, `make check` and
-`make smoke` pass. **Not met, and why:** the *candidate manifest was not produced*. Mining needs
-`GITHUB_TOKEN` (unset) and the date window in `configs/repos.yaml` is still `TODO`. I have not borrowed
-another credential. **Step 1 (triage the real skeleton run) had no data**: no real `cascade run` has
-happened, so there were no failures to classify. I built the triage tool (`cascade triage`) so it is
-ready when results arrive.
+**Acceptance (Phase 4):** every new command dry-runs end to end on the mock provider
+(`tests/test_matrix_cli.py`: pilot, size, calibrate, matrix, ablate, repeat-subset, stats, export),
+and `make check` passes (783 passed, 2 skipped, 1 deselected; `make smoke` passes). Stated plainly,
+what this does and does not show:
+- **The dry run uses 6 SYNTHETIC tasks** over 2 synthetic repo names, mock models, and invented
+  prices. It proves the plumbing, caps, ordering, resumption, and train-only draws. It says nothing
+  about real tasks, real costs, or real model behaviour.
+- **No real input existed.** The manifest and audit log are empty, there is no split, no skeleton run
+  was ever made, and `models.yaml` / `budget.yaml` were unfilled. So the audited counts are zero and
+  **the "sizing table from skeleton-run priors" cannot be produced** (below). I did not assume numbers.
+- **Pre-flight on the real manifest** could not run (no audited tasks); the command refuses with
+  that message. It was verified on the synthetic fixture task, including planted leaks.
+- **Flex is implemented but unverified live** (`DECISIONS.md` 70). Nothing real was called: **$0 spent.**
 
-## Phase 3 (this stop)
+## Audited counts (output of `uv run cascade stats` on the real artifacts today)
+
+```
+repos with audited-ok tasks: 0 (none)
+audited-ok tasks: 0 (train 0, test 0)
+arms: 3 (gpt-6-luna@low, gpt-6-luna@high, gpt-6.1-sol@medium)
+total attempts (matrix rows): 0; logged model calls: 0
+tokens: input 0, output 0, reasoning 0, cached 0, cache-write 0
+spend: $0.0000
+tests in this repository (pytest --collect-only): 786
+```
+
+Split sizes, per-repo counts, and measured costs: none exist yet (empty manifest, no split, no run).
+
+## Sizing table: ESTIMATE, and why it is empty
+
+The brief asked for a sizing table from skeleton-run priors. **There are no priors:** no real
+`cascade run` has ever happened, so there is no measured cost per attempt for any arm. I will not
+invent one. The only honest table now is arithmetic that needs no cost figure: **the most an
+all-arm task may cost for the full matrix to cover N tasks, at a given matrix budget** (budget / N).
+
+| Matrix budget | to cover 40 tasks (minimum) | to cover 60 tasks (target) |
+|---:|---:|---:|
+| $50 | $1.25 per task | $0.83 per task |
+| $100 | $2.50 per task | $1.67 per task |
+| $200 | $5.00 per task | $3.33 per task |
+| $400 | $10.00 per task | $6.67 per task |
+
+"Per task" is the sum of the cheap, mid, and max attempts. The pilot (step 3 of `NEXT.md`) measures
+the real numbers, and `cascade size` prints this same comparison from the pilot ledger at the mean
+and at the p90, with the Flex and drop-the-mid-arm options, and stops for your decision if the full
+matrix covers fewer than 40 tasks at the p90. Pilot, ablation, and repeat spending come out of their
+own buckets, on top of the matrix bucket.
+
+## Phase 4 (this stop)
+
+- **Matrix runner** (`routing/matrix.py`): resumable over (audited task x arm x seed); tasks shuffled
+  with a fixed seed, all arms cheap to max before the next task, so any prefix is a random sample with
+  complete arm coverage; skips finished cells; stops cleanly at the global or bucket cap, a per-task
+  cap too small for a whole task, or the kill-switch file; writes `matrix_status.json`. An attempt
+  that hits its own per-arm cap is a failed cell kept with its cost; one cut short by a global stop
+  is not recorded and reruns (`DECISIONS.md` 68).
+- **Rows and ledger** record model, reasoning effort, processing tier, cached and cache-write tokens,
+  and start time; the ledger also tags every call with its budget bucket. Old files still load.
+- **Pricing and caps in config** (`DECISIONS.md` 66, 67): cached, cache-write, long-context, and
+  flex rules per model; buckets and per-arm attempt caps in `budget.yaml`.
+- **Tiers:** standard by default. `--tier flex` sends `service_tier=flex`, retries the uncharged
+  `429 Resource Unavailable` with backoff, never falls back to standard, and uses a 15-minute client
+  timeout; one tier per matrix store.
+- **Commands:** `preflight`, `pilot`, `size`, `calibrate`, `matrix run|status`, `ablate`,
+  `repeat-subset`, `stats`, `export` (parquet, pyarrow 25.0.1 pinned). `cascade triage` from Phase 3
+  now has the matrix to read.
+- **Config:** `models.yaml` has the brief's three arms by name (cheap, mid, max) and the optional arms
+  disabled; every price is still `TODO`. `budget.yaml` gained the bucket and per-arm cap keys, all `TODO`.
+
+| Check | Result |
+|---|---|
+| `make check` (ruff, format, pyright strict, pytest) | exit 0; 783 passed, 2 skipped (real-Docker test; the shipped-prices cost test, which waits on you), 1 deselected (smoke) |
+| `make smoke` | exit 0 |
+| New tests | 175 across 9 files (pricing 22, selection 27, runner 26, flex 16, sizing and calibration 31, stats and export 14, preflight 13, analysis 7, CLI end to end 19) plus 2 in `test_matrix.py` |
+| Mutation check on the new logic (28 deliberate breakages, scratch edits restored) | 23 caught first time; 4 survived and 1 could not be anchored (a line that occurs twice). The survivors exposed real test gaps (no unit tests for the paired comparison, no exact 40-vs-39 boundary, a CLI tier test that the runner's own check also satisfied); each now has a test and **all 28 are caught** |
+| Cost formula against the shipped Luna and Sol prices | **skipped: those prices are `TODO`.** The formula is verified against synthetic prices, including cached tokens, the long-context multiple on both sides of the threshold, and flex. The test runs against the real prices as soon as you fill them |
+| Real Docker, real GitHub, real model, live Flex | **not exercised this phase** |
+
+Bugs found in review or by the tests and fixed: `size` and `calibrate` built the pipeline config
+differently from the runner, so they would have found no rows if the repo's runtime cap was not its
+default; `export` wrote into the current directory instead of `--runs-dir` (it dropped two files in
+this repo during a test run; I deleted them, and a test now prevents it); the OpenAI client timeout was
+300 s, below Flex's documented 10-minute default; a Phase 2 test and two Phase 1 config tests named the
+old placeholder models.
+
+## Phase 3 (previous stop)
 
 - **Scale** (`taskgen/orchestrate.py`, `cascade taskgen run-all`): all enabled repos in parallel
   (repos x PRs), resumable and idempotent, a failing repo does not stop the rest, one writer for the
@@ -186,3 +263,15 @@ commented, and no token handled by me. The pipeline itself still reads only `GIT
 8. **Nothing in Phase 3 touched the live services.** GraphQL against the real API, the real clone
    and image build at scale, and Docker load at `workers x jobs` are untested; start with the
    defaults (4 x 2) and watch the first run.
+9. **Long-context pricing semantics are my reading.** I implemented "a call whose input is strictly
+   above the threshold bills the whole call's input and output at the configured multiples".
+   Providers differ (whole call vs only the excess, input only vs both). Confirm against the pricing
+   page before filling the numbers; a wrong rule skews cost per task for exactly the long attempts.
+10. **Pilot numbers are noisy.** About 10 attempts per arm: the p90 is roughly the second-largest
+    attempt and pass rates carry wide intervals (shown). Sizing and calibration are inputs to a
+    decision, not conclusions.
+11. **The pilot's stratification is coarse** (repo x size tercile, 10 tasks over 4 repos with click
+    dominant); a pilot can still miss a task type that matters.
+12. **Flex is unverified live,** including whether the gpt-6 models support it, how often agent loops
+    hit `429 Resource Unavailable`, and whether queueing makes a matrix impractically slow.
+

@@ -1,4 +1,141 @@
-# Next (STOP C): audit the tasks
+# Next (STOP D): pilot, size, calibrate, matrix, ablate
+
+Nothing in Phase 4 has spent money or touched a real service: everything was dry-run on the mock
+provider with synthetic tasks (`STATUS.md`). The seven steps you asked for are below, in order. They
+cannot start yet, because **the audited tasks do not exist and the configs are not filled**. Those
+prerequisites come first, and they are all yours.
+
+## Before step 1: what only you can supply
+
+**A. Audited tasks.** `tasks/manifest.jsonl` and `tasks/audit.jsonl` are empty, and there is no split.
+Do "Prerequisite: the audit" further down (token, date window, `taskgen run-all`, split, audit,
+`tasks finalize`). The matrix needs every audited-ok task to have a split.
+
+**B. Fill `configs/models.yaml`.** `uv run cascade config-status` lists every field still `TODO`.
+For `gpt-6-luna` and `gpt-6.1-sol` fill the prices and `knowledge_cutoff` from the pricing page. Also
+look for these rules and fill them only if the page has them (an unset rule means "no such rule"):
+cached-input price, cache-write price, and the long-context rule (threshold, input multiple, output
+multiple). **Check how the long-context rule is applied:** I implemented "a call whose input is
+strictly above the threshold bills the whole call's input and output at the multiples". If the
+provider prices only the tokens above the threshold, or applies a different multiple to output, tell
+me and I will change the formula; do not fill the numbers in until we agree.
+Set `flex_multiplier` (the brief expects 0.5) **only** after confirming that those models support
+Flex; leave it `null` otherwise. The optional arms (`swap_in_cheap`, `sol_high_ref`, `astra_ref`)
+never run unless you add `enabled: true`; `swap_in_cheap` and `astra_ref` have placeholder models
+because the brief does not define them, and `sol_high_ref` is my guess from its name (sol, high).
+
+**C. Fill `configs/budget.yaml`.** `global_cap_usd` is the "total_usd". Guidance so the caps cannot
+cut the work short (the runner stops cleanly at a task boundary if a budget cannot cover a whole
+task, so too-small caps show up as an early stop, not as bad data):
+- `per_arm_attempt_cap_usd` (`cheap`, `mid`, `max`): the most one attempt of that arm may cost.
+- `buckets.pilot` at least 10 x (cheap + mid + max caps); `buckets.matrix` = what you want to spend
+  on the matrix; `buckets.ablate` at least 20 x 2 x mid cap; `buckets.repeat` at least 10 x (cheap +
+  mid caps). The buckets must sum to at most `global_cap_usd`.
+- `per_task_cap_usd` at least 2 x cheap + 4 x mid + max caps: one train task can appear in the
+  pilot/matrix, both ablations, and the repeat. The run stops with `task_cap_too_low` otherwise.
+- `uv run cascade config-status` should then show only the `repos.yaml` lines you already know about.
+
+**D. Preflight.** `uv run cascade preflight` checks every audited-ok task for leaks (workspace and
+every prompt) and writes `runs/preflight.json`. A real run refuses to start without a passing record
+for the tasks it will run. If a task fails, the output names the violation; fix it or mark the task
+`leaks_fix` in the audit.
+
+## The seven steps
+
+1. **Set an OpenAI dashboard spend limit slightly above `global_cap_usd`.** That is the last line of
+   defence if anything here is wrong; the ledger caps are not a substitute for it.
+
+2. **Run the pilot.**
+
+```bash
+export OPENAI_API_KEY=<your key>
+export CASCADE_ALLOW_SPEND=1
+uv run cascade pilot --provider openai
+```
+
+   `--provider openai` is required: the default provider is the mock (hard rule 2), so without it the
+   pilot silently runs for $0 on the mock. The pilot draws 10 TRAIN tasks (stratified by repo and
+   size), runs all three arms at the standard tier, and prints per-task cost, tokens, and both
+   outcomes (`true_success`, `verifier_claimed`). It is resumable (rerun the same command) and
+   `touch KILL_SWITCH` stops it. Look at the first few lines before letting it finish; the first
+   real calls are the first test of the model names, the effort strings, and strict schemas
+   (see "What I expect to go wrong first").
+
+3. **Size and calibrate, then paste both outputs into the chat before continuing.**
+
+```bash
+uv run cascade size
+uv run cascade calibrate
+```
+
+   `size` prints cost per attempt per arm (mean, median, p90), cost per task, and how many tasks each
+   option can cover. It **does not choose**. If the full 3-arm matrix covers fewer than 40 tasks at
+   the p90 it says `DECISION REQUIRED`; do not start step 5 until we have decided. `calibrate` prints
+   pass rate with counts and an interval (10 tasks is noisy), the Verifier's claimed rate and
+   false-positive/false-negative counts, and flags.
+
+4. **If anything is flagged, decide:**
+   - *Cheap arm near 0%* (or at 90%+): swap it (define `swap_in_cheap` in `models.yaml`, add
+     `enabled: true`, and tell me; nothing switches automatically), rebalance the task set, or accept.
+   - *Max arm outside 40-70%*: the tasks may be too easy or too hard to compare policies; options are
+     different tasks (more repos or a different window) or going ahead and saying so in the write-up.
+   - *Too few affordable tasks*: reduce N (a random prefix of the audited tasks, which the task-major
+     order supports), drop the mid arm, raise the budget, or use Flex (below).
+   - **Flex** is opt-in and unverified: it halves the price (if `flex_multiplier` is set) but adds
+     queueing and `429 Resource Unavailable` retries, and a Flex matrix cannot reuse the standard-tier
+     pilot rows (one matrix, one tier): it needs `--tier flex --matrix-db runs/matrix_flex.sqlite`
+     and pays for every task again. Decide before step 5; never mix tiers.
+
+5. **Run the matrix (resumable) and watch the ledger.**
+
+```bash
+uv run cascade matrix run --provider openai
+uv run cascade matrix status
+uv run cascade ledger-summary
+```
+
+   Cells run one task at a time, all arms (cheap to max) before the next task, in a fixed shuffled
+   order, so any prefix is a random sample with complete arm coverage. It skips finished cells
+   (including the pilot's), stops cleanly at the global or bucket cap, and writes
+   `runs/matrix_status.json`. **The kill switch is the stop file:** `touch KILL_SWITCH` (remove it to
+   resume). If it stops with `global_cap` or `bucket_cap`, nothing was lost: rerun after raising the
+   cap. `--max-cells N` runs only N cells.
+
+6. **Run the ablations and the repeat subset.**
+
+```bash
+uv run cascade ablate --provider openai
+uv run cascade repeat-subset --provider openai
+```
+
+   `ablate` runs the mid arm with no Reproducer and with no Reviewer on 20 TRAIN tasks and compares
+   against the matrix's full-pipeline mid rows (run the matrix first, or the comparison has no
+   baseline). `repeat-subset` reruns cheap and mid on 10 TRAIN tasks with a second seed to estimate
+   noise. Neither touches the test split.
+
+7. **Run `cascade stats` and paste the output.**
+
+```bash
+uv run cascade stats
+uv run cascade export
+```
+
+   `stats` prints repos, audited tasks (train/test), arms, attempts, tokens (input, output,
+   reasoning, cached), spend by arm and by bucket, and the number of tests in this repo; every
+   number comes from an artifact. `export` writes `runs/export/matrix.parquet` and `ledger.parquet`.
+
+## Decisions I need from you
+
+1. Everything under "Before step 1": the prices and rules (and whether long-context applies as I
+   implemented it), the budget numbers, the flex multiplier (only if supported), and the optional
+   arms' definitions.
+2. The audit and the split (see the prerequisite below; the repo-level split cannot reach 25-30 test
+   tasks with click dominating the supply).
+3. After step 3: how to handle any flag, and whether the matrix is affordable as is.
+
+---
+
+# Prerequisite: the audit (STOP C, still open)
 
 Goal: a **candidate manifest**, then **your audit**. Target is **60 tasks audited `ok` (minimum 40)**,
 with about **25 to 30 of them in the test split**. Nothing here spends money. Nothing in this phase
@@ -113,124 +250,19 @@ repos, a longer window, or relaxing a filter, and each is your call.
 
 **Paste back** the output of `cascade audit status` and `cascade split show`.
 
-## Decisions I need from you
+## Decisions I need from you (STOP C)
 
 1. **The token and the date window** (part A). The window depends on the knowledge cutoff of your
    arms (`models.yaml`), so those three are linked.
 2. **The split choice** (part B): accept a smaller test split, hold out click, or add repos.
 3. **The audit** (part C): the only step that cannot be automated, and the one that decides what
    enters the experiment.
-4. Everything under "STOP B" below is still open and is **independent of this audit**: the one cheap
-   arm, the budget, and the first paid run of `cascade run`. You can do it before or after.
+4. The models and budget configs (step "Before step 1", B and C, above) are independent of the audit,
+   but the pilot needs both the audit and the configs.
 
 ---
 
-# STOP B instructions (still open, unchanged)
-
-Part 1 of the old list ("get about 5 validated tasks") is **replaced by part A above**; use
-`cascade taskgen run-all` and take the first 5 tasks from the manifest. Parts 2 to 6 stand as written.
-After the first paid results, run `uv run cascade triage` and paste its output too: it classifies each
-failed attempt as a pipeline bug, a Verifier issue, or a genuine model failure, which is what the
-phase 3 brief asked me to do first and could not, because no real run exists yet.
-
-## Part 2. Configure exactly one cheap arm
-
-Replace `configs/models.yaml` with a single model and a single arm. The angle-bracket values are
-yours to supply from the provider's docs and pricing page; I have not filled any (hard rule 5).
-
-```yaml
-models:
-  - name: <model id exactly as the provider lists it>
-    provider: openai
-    input_usd_per_mtok: <number>
-    output_usd_per_mtok: <number>
-    reasoning_usd_per_mtok: null        # null unless reasoning tokens bill differently
-    knowledge_cutoff: <YYYY-MM-DD>
-    reasoning_efforts: [<effort value, e.g. low>]
-arms:
-  - {model: <same model id>, reasoning_effort: <same effort>}
-```
-
-If the model has no effort setting, use `reasoning_efforts: []` and drop `reasoning_effort` from the
-arm. The arm id you will pass to `--arm` is `<model id>@<effort>` (or `<model id>@default`).
-
-## Part 3. Set a small budget
-
-Edit `configs/budget.yaml`. These are **my suggested starting points, a judgment call and not a
-measurement** (real cost per attempt is unknown, see `STATUS.md` risk 2). Lower them if you like:
-
-```yaml
-global_cap_usd: 5.00          # the whole experiment can never exceed this
-per_task_cap_usd: 1.00
-per_attempt_cap_usd: 1.00
-per_attempt_max_tokens: 1000000   # input+output+reasoning, summed over an attempt's calls
-kill_switch_path: KILL_SWITCH
-```
-
-Caps must satisfy per_attempt <= per_task <= global. The per-call check is deliberately pessimistic
-(it reserves `--max-output-tokens` at your output price before every call), so a cap set too tight
-refuses calls that would have fit. To stop everything at any moment: `touch KILL_SWITCH`.
-
-```bash
-uv run cascade config-status    # models.yaml and budget.yaml should show no lines
-```
-
-(`repos.yaml` lines may remain until part 1's date window is set.)
-
-## Part 4. Rehearse for $0 with the mock provider
-
-This uses real Docker, your real task, and your real prices, but no model: the mock fixes nothing,
-so expect `true_success=False`. It proves the plumbing on a real task before you spend anything.
-
-```bash
-TASK=$(uv run python -c "import json; print(json.loads(open('tasks/manifest.jsonl').readline())['task_id'])")
-ARM='<model id>@<effort>'
-uv run cascade run --task "$TASK" --arm "$ARM" --max-output-tokens 8000
-uv run cascade ledger-summary
-```
-
-It finishes in seconds with `calls 6`, `true_success=False`, and a tiny synthetic cost: it proves your
-config, Docker, the clone, workspace export, ledger and matrix on a real task. It does not run click's
-tests (an empty patch short-circuits that), so the first paid run is also the first real test run.
-
-## Part 5. The paid run: ONE task first, then the rest
-
-```bash
-export OPENAI_API_KEY=<your key>
-export CASCADE_ALLOW_SPEND=1
-
-# one task, per-attempt cap of $0.50 (the flag can only lower budget.yaml's cap)
-uv run cascade run --task "$TASK" --arm "$ARM" --provider openai --cap-usd 0.50 --max-output-tokens 8000
-```
-
-Look at the output before continuing. It prints `true_success`, `verifier_claimed`, cost, calls,
-and the artifacts directory. Then compare `ledger total spent so far` with your provider's usage
-dashboard: they should agree closely. If they do not, stop and tell me.
-
-If that looks sane, run the rest (up to 5 tasks in total):
-
-```bash
-for T in $(uv run python -c "import json; [print(json.loads(l)['task_id']) for l in list(open('tasks/manifest.jsonl'))[:5]]"); do
-  uv run cascade run --task "$T" --arm "$ARM" --provider openai --cap-usd 0.50 --max-output-tokens 8000
-done
-```
-
-Rerunning is safe: a task that already has a result is skipped (`--force` reruns it).
-
-## Part 6. Paste back
-
-1. The output of:
-
-```bash
-uv run cascade ledger-summary
-```
-
-2. Any line starting with `error:`, `attempt ended early:`, `grading:`, or `LEAK AUDIT:` from the runs.
-3. For each attempt that failed in a way you do not understand, the contents of its
-   `result.json` (the path is printed as `artifacts:`). The full local trace is next to it in
-   `trace.jsonl`; do not paste that unless I ask, since it holds every prompt.
-
-## What I expect to go wrong first (so you recognize it)
+## What I expect to go wrong first on the pilot (so you recognize it)
 
 This is the first contact with the real API, so some friction is likely and is the point of STOP B:
 
@@ -243,15 +275,3 @@ This is the first contact with the real API, so some friction is likely and is t
   `--cap-usd`, or accept it as a real data point about cost.
 - **`LEAK AUDIT:` lines:** investigate before anything else. A hit may be a harmless coincidence
   (a reproducer reusing a hidden test's name) or a real leak; the artifacts will say which.
-
-## Decisions I need from you (STOP B)
-
-1. **The cheap arm:** which model and effort (part 2).
-2. **Budget numbers** (part 3), if my suggestions are not right for you.
-3. **Part 1 still open:** token choice and date window. Your four extra repos are configured (jinja is
-   dormant, so skip it). Over 12 months they bracket about 52 candidates; for Tier 1's 40+ a window of
-   18 months or more gives margin, if your model's knowledge cutoff allows it.
-4. After seeing the paid results: do you want me to proceed to the 3-arm matrix, or tune prompts first?
-   I will recommend based on what the failures look like.
-5. Approval for the Phase 3 scope when you are ready: per-role ablations and the policy code
-   (fixed, cascade, oracle) come after the matrix exists.

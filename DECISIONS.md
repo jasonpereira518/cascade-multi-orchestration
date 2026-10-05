@@ -278,3 +278,92 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
     errors outrank everything (they are never blamed on the model). One mutant (the false-positive
     branch also matching a case that already returned success) is equivalent and cannot be killed.
 
+## Phase 4 (matrix runner, sizing, calibration, ablations)
+
+64. **The inputs the brief said to take from artifacts did not exist, so nothing was assumed.**
+    `tasks/manifest.jsonl` and `tasks/audit.jsonl` are 0 bytes, there is no `tasks/split.json`, no
+    skeleton run was ever made (so no measured cost), and `configs/models.yaml` / `budget.yaml` were
+    unfilled templates. The audited counts are therefore 0, and the "sizing table from skeleton-run
+    priors" cannot be produced: STATUS.md says so and shows only arithmetic (the break-even cost per
+    task for N >= 40 at a given budget), never a cost figure. `cascade size` computes the real table
+    from the pilot ledger.
+65. **models.yaml carries the names and arms from the brief, nothing else.** `gpt-6-luna` (low, high)
+    and `gpt-6.1-sol` (medium) with labels cheap, mid, max, taken from the brief. Every price and
+    cutoff stays `TODO`. The optional arms are declared but disabled: `optional: true` means an arm
+    never runs unless `enabled: true` is set by the human. `swap_in_cheap` and `astra_ref` have
+    placeholder `TODO-` models because the brief does not define them; `sol_high_ref` is assumed from
+    its name to be sol at effort high and is marked for confirmation.
+66. **Pricing rules live in config, not code.** Optional per-model fields: `cached_input_usd_per_mtok`,
+    `cache_write_usd_per_mtok`, `long_context_threshold_tokens` with input and output multipliers,
+    and `flex_multiplier`. Formula per call: cached and cache-write tokens (subsets of input) bill at
+    their own price when configured, else at the input price (an overstatement, never an
+    understatement); a call whose input is strictly above the threshold bills input and output at the
+    multiples, for the whole call; flex multiplies the result; reasoning bills at the output price
+    unless a reasoning price is set. `flex_multiplier: null` means flex is unavailable for the model,
+    and a flex call on such a model is refused before anything is sent. The worst-case pre-call check
+    applies the same multiples, so a call cannot overshoot a cap on its own.
+67. **Budget buckets and per-arm caps.** `budget.yaml` gains `buckets` (pilot, matrix, ablate,
+    repeat, summing to at most the global cap) and `per_arm_attempt_cap_usd` (keyed by arm label,
+    each at most `per_attempt_cap_usd`). The brief's "total_usd" is the existing `global_cap_usd`; no
+    second field was added for the same quantity. The ledger enforces both on worst-case figures and
+    tags every call with its bucket, tier, and cached tokens (old ledger files migrate in place).
+68. **Runner: what is dropped and what is not.** An attempt that reaches its own per-attempt cap is a
+    failed cell, recorded with the cost incurred, never dropped. An attempt cut short by the kill
+    switch or by the global or bucket cap says nothing about the model, so its row is removed and the
+    cell reruns on resume (its spend stays in the ledger and counts against every cap); keeping it
+    would bake a budget stop in as a model failure. Before a task's first pending cell the runner
+    requires the global, bucket, and per-task budgets to cover all its pending cells at their
+    per-attempt caps, and stops there if not, so a stop never leaves a task with only some arms
+    (which would bias the arm comparison toward the cheap arm). A per-task cap below one task's
+    planned attempts stops the run instead of starving the max arm. Cells run sequentially, because
+    authorize and record are not one atomic reservation (see the ledger's known limit).
+69. **Pilot rows are matrix rows.** The pilot uses the matrix's pipeline config, seed 0, and standard
+    tier, so the matrix skips those cells and `cascade size` credits the pilot tasks as already
+    covered. Consequence for flex: a matrix uses one tier, so a flex matrix cannot reuse the standard
+    pilot rows; it needs a fresh `--matrix-db`, gets no pilot credit in the sizing table, and every
+    task is paid for again. `cascade matrix run` refuses to mix tiers in one store.
+70. **Flex: implemented, off by default, and unverified against the live API.** From OpenAI's Flex
+    documentation: it is requested per call with `service_tier="flex"`; tokens bill at Batch rates;
+    capacity shortages return `429 Resource Unavailable`, which is not charged; the default timeout is
+    10 minutes and should be raised; SDKs retry 408 twice; the docs say nothing about tools,
+    streaming, or prompt caching under flex, and say supported models are listed on the pricing page.
+    The installed openai 3.24.0 / openai-agents 0.23.1 accept `service_tier` (including "flex") and
+    pass `ModelSettings.extra_args` through to `responses.create`, so each turn of an agent loop is
+    an ordinary flex request. Implemented: `--tier flex`, `service_tier` on every call, exponential
+    backoff on resource-unavailable (5 s, doubling, 120 s cap, 8 retries) with no fallback to standard,
+    and a longer client timeout for flex. Not verifiable offline: whether gpt-6-luna and gpt-6.1-sol
+    support flex, and how often agent loops hit 429s. So `flex_multiplier` is `null` until you
+    confirm support on the pricing page, standard stays the default, and the recorded
+    `processing_tier` is the tier requested (the response's echoed tier is not captured).
+71. **Sampling.** Pilot, ablation, and repeat draws go through one train-only function
+    (`draw_train`), stratified round-robin over repo x size tercile (changed source lines), seeded and
+    deterministic per purpose, and re-checked on output. Defaults: pilot 10, ablate 20, repeat 10.
+    Ablations run the mid arm with the Reproducer or the Reviewer off; their baseline is the matrix's
+    full-pipeline mid row for the same task, and only tasks with both rows are compared (the count is
+    always printed).
+72. **Pre-flight gates real runs.** `cascade preflight` runs the leakage checks on every audited-ok
+    task (base-commit workspace and every rendered prompt) and writes `runs/preflight.json`. A real
+    (non-mock) run refuses to start unless that record covers every task it is about to run.
+    Docker-level properties (network off, read-only root) are covered by the sandbox and grading
+    tests and are not repeated per task.
+73. **`cascade size` never picks an option.** Costs per attempt are summed from the pilot ledger
+    (bucket `pilot`); per arm it prints mean, median, and p90 (linear interpolation; with about 10
+    attempts the p90 is roughly the second-largest attempt, and the report says so); cost per task is
+    the sum over arms; affordable N is the floor of remaining matrix budget over cost per task, shown
+    at the mean and at the p90, with the pilot tasks counted as covered under standard tier only. If
+    the full matrix covers fewer than 40 tasks at the p90 it prints DECISION REQUIRED and stops.
+74. **Calibration thresholds.** Flags: max arm outside 40-70% (inclusive bounds), cheap arm at 90% or
+    more, cheap arm "near zero" at 10% or less (my choice of what "near" means). FP rate is
+    P(claimed | failed), FN rate is P(not claimed | passed). The cheap-near-zero flag mentions
+    `swap_in_cheap` and says nothing is switched; no code path switches an arm.
+75. **One pipeline config for every matrix command**, built by `default_pipeline_config`: the repo
+    config's runtime cap plus `--max-output-tokens`, default 8000 here (a per-call ceiling, reasoning
+    included). It differs from `cascade run`'s default of 4096, so rows from a bare `cascade run` are
+    a different cell than pilot or matrix rows. An earlier draft rebuilt the config differently in
+    `size` and `calibrate`, which would have found no rows if the runtime cap differed from its
+    default; caught in review and fixed.
+76. **New dependency: pyarrow 25.0.1, pinned,** for the parquet export (a straight copy of the matrix
+    and ledger rows, deterministic order, nothing derived). The export directory defaults to
+    `<runs-dir>/export`; a first draft defaulted to the working directory and wrote files into the
+    repo during a test, which a regression test now prevents.
+

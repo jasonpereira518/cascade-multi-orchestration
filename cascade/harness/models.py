@@ -11,21 +11,27 @@ Because it sits at the ``Model`` boundary, every role's model calls, including e
 tool-using loop, go through here; nothing in the agents can bypass the ledger.
 
 Usage normalization: the SDK reports ``output_tokens`` INCLUDING reasoning tokens; the ledger wants
-them separate (see providers.base.Usage), so reasoning is subtracted from output. Cached input
-tokens are billed as ordinary input (models.yaml has no cached price), which can only
-overstate cost.
+them separate (see providers.base.Usage), so reasoning is subtracted from output. Cached and
+cache-write input tokens are read from the response and priced by the ledger (at the input price
+unless models.yaml gives them their own, which can only overstate cost).
+
+Flex processing: when the attempt's tier is ``flex``, a ``429 Resource Unavailable`` (never charged
+by the provider) is retried with exponential backoff, then surfaces as an error row. A flex run
+never falls back to standard, so one matrix is always one tier.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import openai
 from agents import ModelSettings
 from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
@@ -36,7 +42,13 @@ from agents.usage import Usage as SdkUsage
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from cascade.errors import CascadeError
-from cascade.harness.ledger import CallContext, Ledger
+from cascade.harness.ledger import (
+    DEFAULT_BUCKET,
+    FLEX_TIER,
+    STANDARD_TIER,
+    CallContext,
+    Ledger,
+)
 from cascade.harness.providers.base import Usage
 from cascade.harness.trace import TraceWriter
 
@@ -52,6 +64,25 @@ class AttemptRef:
     task_id: str
     attempt_id: str
     arm_id: str
+    bucket: str = DEFAULT_BUCKET
+    tier: str = STANDARD_TIER
+
+
+@dataclass(frozen=True)
+class FlexRetryPolicy:
+    """Backoff for flex's uncharged ``429 Resource Unavailable``: base * 2**n seconds, capped."""
+
+    max_retries: int = 8
+    base_s: float = 5.0
+    cap_s: float = 120.0
+
+    def delay(self, retry_index: int) -> float:
+        return min(self.base_s * 2**retry_index, self.cap_s)
+
+
+def is_resource_unavailable(error: BaseException) -> bool:
+    """True for the 429 flex returns when it has no capacity (and does not charge for)."""
+    return isinstance(error, openai.RateLimitError) and "resource unavailable" in str(error).lower()
 
 
 def usage_from_sdk(usage: SdkUsage) -> Usage:
@@ -60,6 +91,8 @@ def usage_from_sdk(usage: SdkUsage) -> Usage:
         input_tokens=usage.input_tokens,
         output_tokens=max(usage.output_tokens - reasoning, 0),
         reasoning_tokens=reasoning,
+        cached_tokens=usage.input_tokens_details.cached_tokens or 0,
+        cache_write_tokens=getattr(usage.input_tokens_details, "cache_write_tokens", 0) or 0,
     )
 
 
@@ -82,7 +115,11 @@ class MeteredModel(Model):
         provider_name: str,
         real: bool,
         trace: TraceWriter | None = None,
+        flex_retry: FlexRetryPolicy | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        self._flex_retry = flex_retry or FlexRetryPolicy()
+        self._sleep = sleep
         self._inner = inner
         self._ledger = ledger
         self._attempt = attempt
@@ -103,6 +140,8 @@ class MeteredModel(Model):
             attempt_id=a.attempt_id,
             arm_id=a.arm_id,
             role=self._role,
+            bucket=a.bucket,
+            tier=a.tier,
         )
 
     async def get_response(
@@ -133,18 +172,33 @@ class MeteredModel(Model):
         )
         start = time.monotonic()
         try:
-            response = await self._inner.get_response(
-                system_instructions,
-                input,
-                model_settings,
-                tools,
-                output_schema,
-                handoffs,
-                tracing,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-                prompt=prompt,
-            )
+            retries = 0
+            while True:
+                try:
+                    response = await self._inner.get_response(
+                        system_instructions,
+                        input,
+                        model_settings,
+                        tools,
+                        output_schema,
+                        handoffs,
+                        tracing,
+                        previous_response_id=previous_response_id,
+                        conversation_id=conversation_id,
+                        prompt=prompt,
+                    )
+                    break
+                except Exception as e:
+                    flex = ctx.tier == FLEX_TIER and is_resource_unavailable(e)
+                    if not flex or retries >= self._flex_retry.max_retries:
+                        raise
+                    delay = self._flex_retry.delay(retries)
+                    retries += 1
+                    self._trace.write(
+                        "flex_retry", role=self._role, call_id=ctx.call_id, retry=retries,
+                        delay_s=delay,
+                    )  # fmt: skip
+                    await self._sleep(delay)
         except Exception as e:
             self._ledger.record(
                 ctx,

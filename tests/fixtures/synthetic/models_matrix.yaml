@@ -1,0 +1,39 @@
+# SYNTHETIC test config for the matrix tests. Mock identifiers and invented prices and rules. Not real
+# models, not real prices. Labels, optional arms, long-context and flex rules exist to exercise the code.
+models:
+  - name: mock-luna
+    provider: mock
+    input_usd_per_mtok: 1.0
+    output_usd_per_mtok: 4.0
+    cached_input_usd_per_mtok: 0.25
+    long_context_threshold_tokens: 100000
+    long_context_input_multiplier: 2.0
+    long_context_output_multiplier: 1.5
+    flex_multiplier: 0.5
+    knowledge_cutoff: 2024-01-01
+    reasoning_efforts: [low, high]
+  - name: mock-sol
+    provider: mock
+    input_usd_per_mtok: 10.0
+    output_usd_per_mtok: 40.0
+    reasoning_usd_per_mtok: 50.0
+    cache_write_usd_per_mtok: 12.5
+    long_context_threshold_tokens: 200000
+    long_context_input_multiplier: 2.0
+    long_context_output_multiplier: 1.5
+    flex_multiplier: 0.5
+    knowledge_cutoff: 2024-06-01
+    reasoning_efforts: [medium, high]
+  - name: mock-noflex
+    provider: mock
+    input_usd_per_mtok: 2.0
+    output_usd_per_mtok: 8.0
+    knowledge_cutoff: 2024-01-01
+    reasoning_efforts: []
+
+arms:
+  - {label: cheap, model: mock-luna, reasoning_effort: low}
+  - {label: mid, model: mock-luna, reasoning_effort: high}
+  - {label: max, model: mock-sol, reasoning_effort: medium}
+  - {label: swap_in_cheap, model: mock-noflex, optional: true}
+  - {label: sol_high_ref, model: mock-sol, reasoning_effort: high, optional: true}

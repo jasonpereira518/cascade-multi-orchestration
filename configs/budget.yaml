@@ -8,3 +8,23 @@ per_attempt_max_tokens: TODO  # input + output + reasoning tokens for one attemp
 
 # Touch this file to halt all calls immediately (e.g. `touch KILL_SWITCH`). Gitignored.
 kill_switch_path: KILL_SWITCH
+
+# `global_cap_usd` above is the experiment's total spend ceiling (the "total_usd" of the brief); set
+# the OpenAI dashboard spend limit slightly above it.
+#
+# Spending buckets. A call tagged with a bucket is refused once that bucket's spend plus the call's
+# worst case would exceed its cap. The buckets must sum to at most global_cap_usd. The CLI tags:
+#   pilot (cascade pilot), matrix (cascade matrix run), ablate (cascade ablate), repeat
+#   (cascade repeat-subset). `cascade size` reads the matrix bucket as "the remaining matrix budget".
+buckets:
+  pilot: TODO
+  matrix: TODO
+  ablate: TODO
+  repeat: TODO
+
+# Per-arm per-attempt dollar caps, keyed by arm label (or arm id). Each must be <= per_attempt_cap_usd.
+# An attempt that reaches its cap is recorded as a failed cell with the cost it incurred.
+per_arm_attempt_cap_usd:
+  cheap: TODO
+  mid: TODO
+  max: TODO

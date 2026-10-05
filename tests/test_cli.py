@@ -25,7 +25,7 @@ repos:
 def test_config_status_lists_todos_in_shipped_configs() -> None:
     result = runner.invoke(app, ["config-status", "--configs-dir", str(ROOT / "configs")])
     assert result.exit_code == 1
-    assert "models.yaml: models[0].name" in result.output
+    assert "models.yaml: models[0].input_usd_per_mtok" in result.output
     assert "budget.yaml: global_cap_usd" in result.output
     assert "repos.yaml: date_window.start" in result.output
     assert "unfilled TODO field(s)" in result.output

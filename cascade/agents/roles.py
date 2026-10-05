@@ -65,7 +65,9 @@ ROLE_SPECS: dict[str, RoleSpec] = {
 }
 
 
-def model_settings_for(arm: ArmSpec, max_output_tokens: int) -> ModelSettings:
+def model_settings_for(
+    arm: ArmSpec, max_output_tokens: int, tier: str = "standard"
+) -> ModelSettings:
     """Settings for every call of an arm: the arm's reasoning effort and a hard output ceiling.
 
     ``store=False`` keeps the provider from retaining responses server-side. ``max_tokens`` bounds
@@ -74,11 +76,22 @@ def model_settings_for(arm: ArmSpec, max_output_tokens: int) -> ModelSettings:
     reasoning = None
     if arm.reasoning_effort is not None:
         reasoning = Reasoning(effort=cast(Any, arm.reasoning_effort))
-    return ModelSettings(max_tokens=max_output_tokens, reasoning=reasoning, store=False)
+    # service_tier goes out as an extra request argument; standard sends nothing, so the default
+    # path is byte-for-byte what it was before tiers existed.
+    extra = {"service_tier": "flex"} if tier == "flex" else None
+    return ModelSettings(
+        max_tokens=max_output_tokens, reasoning=reasoning, store=False, extra_args=extra
+    )
 
 
 def build_agent(
-    spec: RoleSpec, *, model: Model, toolbox: Toolbox | None, arm: ArmSpec, max_output_tokens: int
+    spec: RoleSpec,
+    *,
+    model: Model,
+    toolbox: Toolbox | None,
+    arm: ArmSpec,
+    max_output_tokens: int,
+    tier: str = "standard",
 ) -> Agent[Any]:
     tools = toolbox.tools(spec.tools) if toolbox is not None else []
     return Agent(
@@ -86,7 +99,7 @@ def build_agent(
         instructions=spec.instructions,
         tools=tools,
         model=model,
-        model_settings=model_settings_for(arm, max_output_tokens),
+        model_settings=model_settings_for(arm, max_output_tokens, tier),
         output_type=spec.output_type,
     )
 

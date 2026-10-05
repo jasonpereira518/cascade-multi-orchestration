@@ -37,7 +37,13 @@ class MockPlanExhaustedError(ProviderError):
     """A strict plan ran out of steps."""
 
 
-def sdk_usage(input_tokens: int, output_tokens: int, reasoning_tokens: int = 0) -> SdkUsage:
+def sdk_usage(
+    input_tokens: int,
+    output_tokens: int,
+    reasoning_tokens: int = 0,
+    cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> SdkUsage:
     """SDK usage as a real provider reports it: output_tokens INCLUDES reasoning tokens."""
     total_out = output_tokens + reasoning_tokens
     return SdkUsage(
@@ -45,7 +51,9 @@ def sdk_usage(input_tokens: int, output_tokens: int, reasoning_tokens: int = 0) 
         input_tokens=input_tokens,
         output_tokens=total_out,
         total_tokens=input_tokens + total_out,
-        input_tokens_details=InputTokensDetails(cached_tokens=0, cache_write_tokens=0),
+        input_tokens_details=InputTokensDetails(
+            cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens
+        ),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=reasoning_tokens),
     )
 

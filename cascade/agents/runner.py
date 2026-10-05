@@ -14,6 +14,7 @@ while its earlier spend stays in the ledger and in the task and global totals.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import shutil
 import time
@@ -28,7 +29,7 @@ from cascade.agents.pipeline import AgentPipeline, AttemptOutcome, PipelineConfi
 from cascade.agents.verifier import usable
 from cascade.config import ArmSpec
 from cascade.harness.grading import GradingRunner
-from cascade.harness.ledger import Ledger
+from cascade.harness.ledger import DEFAULT_BUCKET, STANDARD_TIER, Ledger
 from cascade.harness.models import AttemptRef
 from cascade.harness.providers.base import ModelSource
 from cascade.harness.sandbox import ContainerRunner, LeakGuard, SandboxRunner, prepare_workspace
@@ -129,6 +130,8 @@ def run_attempt(
     forbidden_host_paths: Sequence[Path] = (),
     grading_timeout_s: float = 120.0,
     force: bool = False,
+    bucket: str = DEFAULT_BUCKET,
+    tier: str = STANDARD_TIER,
 ) -> RunReport:
     cfg_json = config.canonical()
     cfg_id = config_id_of(cfg_json)
@@ -151,6 +154,8 @@ def run_attempt(
         task_id=task.task_id,
         attempt_id=next_attempt_id(ledger, task.task_id, base_id),
         arm_id=arm.arm_id,
+        bucket=bucket,
+        tier=tier,
     )
     trace = TraceWriter(attempt_dir / "trace.jsonl")
     guard = LeakGuard.from_task(task, host_paths=forbidden_host_paths)
@@ -161,6 +166,7 @@ def run_attempt(
         source=source, arm=arm, ledger=ledger, executor=agent_executor, config=config,
         attempt=attempt, trace=trace, scratch=scratch,
     )  # fmt: skip
+    started_at = dt.datetime.now(dt.UTC).isoformat()
     started = time.monotonic()
     outcome = pipeline.run(task.agent_view(), base_dir, work_dir)
     wall_s = time.monotonic() - started
@@ -189,6 +195,12 @@ def run_attempt(
         patch_sha=patch_sha(outcome.src_patch),
         pipeline_config=cfg_json,
         error=outcome.error,
+        model=arm.model,
+        reasoning_effort=arm.reasoning_effort,
+        processing_tier=tier,
+        cached_tokens=totals.cached_tokens,
+        cache_write_tokens=totals.cache_write_tokens,
+        started_at=started_at,
     )
     (attempt_dir / "patch.diff").write_text(outcome.src_patch, encoding="utf-8")
     (attempt_dir / "result.json").write_text(

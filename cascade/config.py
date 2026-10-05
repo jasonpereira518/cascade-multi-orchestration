@@ -46,6 +46,12 @@ def find_todos(value: Any, path: str = "") -> list[str]:
         for i, item in enumerate(items):
             found += find_todos(item, f"{path}[{i}]")
         return found
+    if isinstance(value, dict):
+        mapping: dict[Any, Any] = dict(value)  # pyright: ignore[reportUnknownArgumentType]
+        found = []
+        for key, item in mapping.items():
+            found += find_todos(item, f"{path}[{key}]")
+        return found
     return []
 
 
@@ -53,11 +59,20 @@ def find_todos(value: Any, path: str = "") -> list[str]:
 
 
 class Prices(_Strict):
-    """Resolved USD prices per million tokens."""
+    """Resolved USD prices per million tokens, plus the optional pricing rules a model has."""
 
     input_usd_per_mtok: Price
     output_usd_per_mtok: Price
     reasoning_usd_per_mtok: Price
+    # Billed instead of the input price for cached / cache-write input tokens (None: input price).
+    cached_input_usd_per_mtok: Price | None = None
+    cache_write_usd_per_mtok: Price | None = None
+    # A call whose input exceeds the threshold bills input (and output) at these multiples.
+    long_context_threshold_tokens: Annotated[int, Field(gt=0)] | None = None
+    long_context_input_multiplier: Annotated[float, Field(ge=1)] = 1.0
+    long_context_output_multiplier: Annotated[float, Field(ge=1)] = 1.0
+    # Multiplier for service_tier="flex" calls; None means flex is not available for this model.
+    flex_multiplier: Annotated[float, Field(gt=0, le=1)] | None = None
 
 
 class ModelSpec(_Strict):
@@ -67,6 +82,14 @@ class ModelSpec(_Strict):
     output_usd_per_mtok: Price | Todo
     # None means reasoning tokens are billed at the output price.
     reasoning_usd_per_mtok: Price | None = None
+    # Optional pricing rules, all from the provider's pricing page (see Prices). Leave unset where
+    # the provider has no such rule; nothing is assumed.
+    cached_input_usd_per_mtok: Price | None = None
+    cache_write_usd_per_mtok: Price | None = None
+    long_context_threshold_tokens: Annotated[int, Field(gt=0)] | None = None
+    long_context_input_multiplier: Annotated[float, Field(ge=1)] = 1.0
+    long_context_output_multiplier: Annotated[float, Field(ge=1)] = 1.0
+    flex_multiplier: Annotated[float, Field(gt=0, le=1)] | None = None
     knowledge_cutoff: dt.date | Todo
     # Valid reasoning-effort values for this model. Empty means the model has no effort setting.
     reasoning_efforts: list[str] = Field(default_factory=list)
@@ -80,6 +103,12 @@ class ModelSpec(_Strict):
             input_usd_per_mtok=input_price,
             output_usd_per_mtok=output_price,
             reasoning_usd_per_mtok=output_price if reasoning is None else reasoning,
+            cached_input_usd_per_mtok=self.cached_input_usd_per_mtok,
+            cache_write_usd_per_mtok=self.cache_write_usd_per_mtok,
+            long_context_threshold_tokens=self.long_context_threshold_tokens,
+            long_context_input_multiplier=self.long_context_input_multiplier,
+            long_context_output_multiplier=self.long_context_output_multiplier,
+            flex_multiplier=self.flex_multiplier,
         )
 
 
@@ -88,6 +117,17 @@ class ArmSpec(_Strict):
 
     model: str
     reasoning_effort: str | None = None
+    # A short role name ("cheap", "mid", "max") used by budget.yaml and the CLI.
+    label: str | None = None
+    # An optional arm never runs unless the human sets `enabled: true` on it explicitly.
+    optional: bool = False
+    enabled: bool | None = None
+
+    @property
+    def is_enabled(self) -> bool:
+        if self.enabled is None:
+            return not self.optional
+        return self.enabled
 
     @property
     def arm_id(self) -> str:
@@ -120,7 +160,23 @@ class ModelsConfig(_Strict):
             if arm.arm_id in arm_ids:
                 raise ValueError(f"duplicate arm {arm.arm_id}")
             arm_ids.add(arm.arm_id)
+        labels = [a.label for a in self.arms if a.label is not None]
+        if len(set(labels)) != len(labels):
+            raise ValueError("duplicate arm labels")
         return self
+
+    def matrix_arms(self) -> list[ArmSpec]:
+        """The arms the matrix runs, in file order (cheapest first, by convention of the file).
+
+        Optional arms are included only if the human set ``enabled: true`` on them.
+        """
+        return [a for a in self.arms if a.is_enabled]
+
+    def arm_by_label_or_id(self, key: str) -> ArmSpec:
+        for a in self.arms:
+            if key in (a.label, a.arm_id):
+                return a
+        raise KeyError(f"unknown arm {key!r}")
 
     def model_spec(self, name: str) -> ModelSpec:
         for m in self.models:
@@ -144,12 +200,29 @@ class ResolvedBudget(_Strict):
     per_attempt_cap_usd: Cap
     per_attempt_max_tokens: Annotated[int, Field(gt=0)]
     kill_switch_path: Path
+    # Named spending buckets (e.g. pilot, matrix, ablate, repeat). A call tagged with a bucket
+    # that has a cap is refused once the bucket's spend plus the call's worst case would exceed it.
+    buckets: dict[str, Cap] = Field(default_factory=dict)
+    # Per-arm per-attempt caps, keyed by arm label or arm id. Never above per_attempt_cap_usd.
+    per_arm_attempt_cap_usd: dict[str, Cap] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_ordering(self) -> ResolvedBudget:
         if not self.per_attempt_cap_usd <= self.per_task_cap_usd <= self.global_cap_usd:
             raise ValueError("caps must satisfy per_attempt <= per_task <= global")
+        if sum(self.buckets.values()) > self.global_cap_usd + 1e-9:
+            raise ValueError("bucket caps must sum to at most global_cap_usd")
+        for arm, cap in self.per_arm_attempt_cap_usd.items():
+            if cap > self.per_attempt_cap_usd + 1e-12:
+                raise ValueError(f"per-arm cap for {arm!r} exceeds per_attempt_cap_usd")
         return self
+
+    def attempt_cap_for(self, arm_id: str, label: str | None = None) -> float:
+        """The per-attempt dollar cap that applies to an arm (its own, else the general one)."""
+        for key in (arm_id, label):
+            if key is not None and key in self.per_arm_attempt_cap_usd:
+                return self.per_arm_attempt_cap_usd[key]
+        return self.per_attempt_cap_usd
 
 
 class BudgetConfig(_Strict):
@@ -159,6 +232,8 @@ class BudgetConfig(_Strict):
     per_attempt_max_tokens: Annotated[int, Field(gt=0)] | Todo
     # Touch this file to halt all spend. Relative paths resolve against the working directory.
     kill_switch_path: str = "KILL_SWITCH"
+    buckets: dict[str, Cap | Todo] = Field(default_factory=dict)
+    per_arm_attempt_cap_usd: dict[str, Cap | Todo] = Field(default_factory=dict)
 
     def resolve(self) -> ResolvedBudget:
         todos = find_todos(self)

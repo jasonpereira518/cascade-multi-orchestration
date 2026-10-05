@@ -14,6 +14,8 @@ class Usage(BaseModel):
 
     ``output_tokens`` EXCLUDES ``reasoning_tokens``. The Agents SDK reports reasoning tokens as a
     subset of output tokens; harness.models subtracts them so nothing is billed twice.
+    ``cached_tokens`` and ``cache_write_tokens`` are SUBSETS of ``input_tokens`` (the provider
+    reports total input and says how much of it was a cache hit or a cache write).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -21,6 +23,8 @@ class Usage(BaseModel):
     input_tokens: Annotated[int, Field(ge=0)]
     output_tokens: Annotated[int, Field(ge=0)]
     reasoning_tokens: Annotated[int, Field(ge=0)] = 0
+    cached_tokens: Annotated[int, Field(ge=0)] = 0
+    cache_write_tokens: Annotated[int, Field(ge=0)] = 0
 
 
 class ModelSource(ABC):

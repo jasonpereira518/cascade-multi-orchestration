@@ -24,8 +24,13 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cascade.config import ModelsConfig, ResolvedBudget
-from cascade.errors import BudgetExceededError, DuplicateCallError, KillSwitchEngagedError
+from cascade.config import ModelsConfig, Prices, ResolvedBudget
+from cascade.errors import (
+    BudgetExceededError,
+    CascadeError,
+    DuplicateCallError,
+    KillSwitchEngagedError,
+)
 from cascade.harness.providers.base import Usage
 from cascade.harness.spend import require_spend_allowed
 
@@ -46,13 +51,27 @@ CREATE TABLE IF NOT EXISTS calls (
     cost_usd REAL NOT NULL,
     latency_s REAL NOT NULL,
     status TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    processing_tier TEXT NOT NULL DEFAULT 'standard',
+    bucket TEXT NOT NULL DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_calls_task ON calls(task_id);
 CREATE INDEX IF NOT EXISTS idx_calls_attempt ON calls(task_id, attempt_id);
 """
 
 _EPS = 1e-12
+# Columns added after the first schema; older ledger files are migrated in place.
+_ADDED_COLUMNS = (
+    ("cached_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("processing_tier", "TEXT NOT NULL DEFAULT 'standard'"),
+    ("bucket", "TEXT NOT NULL DEFAULT 'default'"),
+)
+STANDARD_TIER = "standard"
+FLEX_TIER = "flex"
+DEFAULT_BUCKET = "default"
 
 
 @dataclass(frozen=True)
@@ -66,6 +85,8 @@ class CallContext:
     attempt_id: str
     arm_id: str
     role: str
+    bucket: str = DEFAULT_BUCKET
+    tier: str = STANDARD_TIER
 
 
 @dataclass(frozen=True)
@@ -76,6 +97,8 @@ class AttemptTotals:
     reasoning_tokens: int
     cost_usd: float
     latency_s: float
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class CallRecord(BaseModel):
@@ -97,6 +120,52 @@ class CallRecord(BaseModel):
     latency_s: Annotated[float, Field(ge=0)]
     status: str
     error: str | None = None
+    cached_tokens: Annotated[int, Field(ge=0)] = 0
+    cache_write_tokens: Annotated[int, Field(ge=0)] = 0
+    processing_tier: str = STANDARD_TIER
+    bucket: str = DEFAULT_BUCKET
+
+
+def _long_context_multiples(p: Prices, input_tokens: int) -> tuple[float, float]:
+    threshold = p.long_context_threshold_tokens
+    if threshold is not None and input_tokens > threshold:
+        return p.long_context_input_multiplier, p.long_context_output_multiplier
+    return 1.0, 1.0
+
+
+def _tier_multiplier(p: Prices, tier: str, model: str) -> float:
+    if tier == STANDARD_TIER:
+        return 1.0
+    if tier == FLEX_TIER:
+        if p.flex_multiplier is None:
+            raise CascadeError(
+                f"model {model!r} has no flex_multiplier in models.yaml, so it cannot run on flex"
+            )
+        return p.flex_multiplier
+    raise CascadeError(f"unknown processing tier {tier!r}; expected 'standard' or 'flex'")
+
+
+def cost_of_usage(p: Prices, usage: Usage, tier: str = STANDARD_TIER, *, model: str = "") -> float:
+    """The pricing formula, as a pure function (also used to check logged rows)."""
+    cached = min(usage.cached_tokens, usage.input_tokens)
+    written = min(usage.cache_write_tokens, usage.input_tokens - cached)
+    plain = usage.input_tokens - cached - written
+    cached_price = (
+        p.input_usd_per_mtok
+        if p.cached_input_usd_per_mtok is None
+        else (p.cached_input_usd_per_mtok)
+    )
+    write_price = (
+        p.input_usd_per_mtok if p.cache_write_usd_per_mtok is None else (p.cache_write_usd_per_mtok)
+    )
+    in_mult, out_mult = _long_context_multiples(p, usage.input_tokens)
+    input_cost = plain * p.input_usd_per_mtok + cached * cached_price + written * write_price
+    output_cost = (
+        usage.output_tokens * p.output_usd_per_mtok
+        + usage.reasoning_tokens * p.reasoning_usd_per_mtok
+    )
+    base = (input_cost * in_mult + output_cost * out_mult) / 1e6
+    return base * _tier_multiplier(p, tier, model)
 
 
 class Ledger:
@@ -110,24 +179,44 @@ class Ledger:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        have = {r[1] for r in self._conn.execute("PRAGMA table_info(calls)").fetchall()}
+        for column, ddl in _ADDED_COLUMNS:
+            if column not in have:
+                self._conn.execute(f"ALTER TABLE calls ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         self._conn.close()
 
     # --- pricing -------------------------------------------------------------------------------
 
-    def cost_of(self, model: str, usage: Usage) -> float:
-        p = self._models.prices_for(model)
-        return (
-            usage.input_tokens * p.input_usd_per_mtok
-            + usage.output_tokens * p.output_usd_per_mtok
-            + usage.reasoning_tokens * p.reasoning_usd_per_mtok
-        ) / 1e6
+    def cost_of(self, model: str, usage: Usage, tier: str = STANDARD_TIER) -> float:
+        """USD for one call, from models.yaml prices and the call's reported usage.
 
-    def worst_case_cost(self, model: str, est_input_tokens: int, max_output_tokens: int) -> float:
+        Input: cached and cache-write tokens bill at their own price when one is configured, else
+        at the input price (cached is a subset of input, so this can only overstate). A call whose
+        input exceeds the model's long-context threshold bills input and output at the configured
+        multiples. Flex calls bill at the model's flex multiple; a model with none configured
+        cannot be run on flex.
+        """
+        return cost_of_usage(self._models.prices_for(model), usage, tier, model=model)
+
+    def worst_case_cost(
+        self, model: str, est_input_tokens: int, max_output_tokens: int, tier: str = STANDARD_TIER
+    ) -> float:
         p = self._models.prices_for(model)
         out_price = max(p.output_usd_per_mtok, p.reasoning_usd_per_mtok)
-        return (est_input_tokens * p.input_usd_per_mtok + max_output_tokens * out_price) / 1e6
+        # The input estimate is deliberately pessimistic (see harness.models), so the long-context
+        # multiples are applied when the estimate crosses the threshold.
+        in_mult, out_mult = _long_context_multiples(p, est_input_tokens)
+        base = (
+            est_input_tokens * p.input_usd_per_mtok * in_mult
+            + max_output_tokens * out_price * out_mult
+        ) / 1e6
+        return base * _tier_multiplier(p, tier, model)
+
+    def attempt_cap(self, arm_id: str) -> float:
+        label = next((a.label for a in self._models.arms if a.arm_id == arm_id), None)
+        return self._budget.attempt_cap_for(arm_id, label)
 
     # --- pre-call gate -------------------------------------------------------------------------
 
@@ -145,16 +234,24 @@ class Ledger:
         if real:
             require_spend_allowed(f"real call to {model}")
 
-        worst = self.worst_case_cost(model, est_input_tokens, max_output_tokens)
-        scopes = (
+        worst = self.worst_case_cost(model, est_input_tokens, max_output_tokens, ctx.tier)
+        scopes: list[tuple[str, float, float]] = [
             ("global", self.spent_usd(), self._budget.global_cap_usd),
             ("task", self.spent_usd(task_id=ctx.task_id), self._budget.per_task_cap_usd),
             (
                 "attempt",
                 self.spent_usd(task_id=ctx.task_id, attempt_id=ctx.attempt_id),
-                self._budget.per_attempt_cap_usd,
+                self.attempt_cap(ctx.arm_id),
             ),
-        )
+        ]
+        if ctx.bucket in self._budget.buckets:
+            scopes.append(
+                (
+                    "bucket",
+                    self.bucket_spent_usd(ctx.bucket),
+                    self._budget.buckets[ctx.bucket],
+                )
+            )
         for scope, spent, cap in scopes:
             if spent + worst > cap + _EPS:
                 raise BudgetExceededError(
@@ -198,16 +295,21 @@ class Ledger:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             reasoning_tokens=usage.reasoning_tokens,
-            cost_usd=self.cost_of(model, usage),
+            cost_usd=self.cost_of(model, usage, ctx.tier),
             latency_s=latency_s,
             status=status,
             error=error,
+            cached_tokens=usage.cached_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            processing_tier=ctx.tier,
+            bucket=ctx.bucket,
         )
         try:
             self._conn.execute(
                 "INSERT INTO calls VALUES (:call_id, :ts, :run_id, :task_id, :attempt_id, :arm_id,"
                 " :role, :provider, :model, :input_tokens, :output_tokens, :reasoning_tokens,"
-                " :cost_usd, :latency_s, :status, :error)",
+                " :cost_usd, :latency_s, :status, :error, :cached_tokens, :cache_write_tokens,"
+                " :processing_tier, :bucket)",
                 rec.model_dump(),
             )
         except sqlite3.IntegrityError as e:
@@ -231,6 +333,12 @@ class Ledger:
                 " WHERE task_id = ? AND attempt_id = ?",
                 (task_id, attempt_id),
             ).fetchone()
+        return float(row[0])
+
+    def bucket_spent_usd(self, bucket: str) -> float:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM calls WHERE bucket = ?", (bucket,)
+        ).fetchone()
         return float(row[0])
 
     def tokens_used(self, *, task_id: str, attempt_id: str) -> int:
@@ -259,7 +367,9 @@ class Ledger:
         row = self._conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),"
             " COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cost_usd), 0.0),"
-            " COALESCE(SUM(latency_s), 0.0) FROM calls WHERE task_id = ? AND attempt_id = ?",
+            " COALESCE(SUM(latency_s), 0.0), COALESCE(SUM(cached_tokens), 0),"
+            " COALESCE(SUM(cache_write_tokens), 0)"
+            " FROM calls WHERE task_id = ? AND attempt_id = ?",
             (task_id, attempt_id),
         ).fetchone()
         return AttemptTotals(
@@ -269,6 +379,8 @@ class Ledger:
             reasoning_tokens=int(row[3]),
             cost_usd=float(row[4]),
             latency_s=float(row[5]),
+            cached_tokens=int(row[6]),
+            cache_write_tokens=int(row[7]),
         )
 
     def rows(self) -> list[CallRecord]:

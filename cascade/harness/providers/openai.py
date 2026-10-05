@@ -20,6 +20,9 @@ from cascade.harness.providers.base import ModelSource
 from cascade.harness.spend import require_spend_allowed
 
 API_KEY_ENV = "OPENAI_API_KEY"
+STANDARD_TIMEOUT_S = 300.0
+# Flex requests can queue; OpenAI documents a 10-minute default timeout and advises raising it.
+FLEX_TIMEOUT_S = 900.0
 
 
 class MissingApiKeyError(CascadeError):
@@ -30,13 +33,14 @@ class OpenAIModelSource(ModelSource):
     name = "openai"
     is_real = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, flex: bool = False) -> None:
         require_spend_allowed("constructing OpenAIModelSource")
         key = os.environ.get(API_KEY_ENV)
         if not key:
             raise MissingApiKeyError(f"{API_KEY_ENV} is not set")
         # Constructing the client does not contact the network.
-        self._client = AsyncOpenAI(api_key=key, max_retries=2, timeout=300.0)
+        self.timeout_s = FLEX_TIMEOUT_S if flex else STANDARD_TIMEOUT_S
+        self._client = AsyncOpenAI(api_key=key, max_retries=2, timeout=self.timeout_s)
 
     def model_for(self, model_name: str, role: str) -> Model:
         # Re-checked per model: the env can change after construction.

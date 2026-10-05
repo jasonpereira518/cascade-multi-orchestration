@@ -1,0 +1,15 @@
+# SYNTHETIC test budget for the matrix tests. Invented caps. kill_switch_path is overridden per test.
+global_cap_usd: 50.0
+per_task_cap_usd: 5.0
+per_attempt_cap_usd: 1.0
+per_attempt_max_tokens: 2000000
+kill_switch_path: KILL_SWITCH
+buckets:
+  pilot: 10.0
+  matrix: 20.0
+  ablate: 8.0
+  repeat: 5.0
+per_arm_attempt_cap_usd:
+  cheap: 0.2
+  mid: 0.5
+  max: 1.0

@@ -153,7 +153,7 @@ class AgentPipeline:
         )
         agent = build_agent(
             spec, model=model, toolbox=toolbox, arm=self._arm,
-            max_output_tokens=self._cfg.max_output_tokens,
+            max_output_tokens=self._cfg.max_output_tokens, tier=self._attempt.tier,
         )  # fmt: skip
         started = time.monotonic()
         try:
