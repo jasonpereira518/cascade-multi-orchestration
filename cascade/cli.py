@@ -9,7 +9,7 @@ from typing import Annotated
 
 import typer
 
-from cascade import matrix_cli
+from cascade import eval_cli, matrix_cli
 from cascade.agents import runner as agent_runner
 from cascade.agents.pipeline import PipelineConfig
 from cascade.agents.triage import format_triage, triage_runs
@@ -537,3 +537,4 @@ def triage_command(
 
 
 matrix_cli.register(app)  # preflight, pilot, size, calibrate, matrix, ablate, ...
+eval_cli.register(app)  # eval (dev: train/CV only; --final: once, guarded)

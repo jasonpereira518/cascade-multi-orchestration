@@ -1,11 +1,94 @@
-# Next (STOP D): pilot, size, calibrate, matrix, ablate
+# Next (STOP E): confirm the plan, then run the final evaluation once
+
+Nothing in Phase 5 touched a real matrix or the test split: there is no real matrix yet (see "Before
+step 1"). Everything was built and tested on a labeled-synthetic dataset. Four things are yours, in
+order, and the last one can only be done once.
+
+## Before step 1: what must exist first (all still open)
+
+The final evaluation needs a **real, exported matrix** and **finalized tasks**. That is the work of the
+earlier stops, unchanged and listed further down: the audit and split (STOP C), then the pilot, the
+matrix run, the ablations and the repeat subset (STOP D). When they are done:
+
+```bash
+uv run cascade export        # writes runs/export/matrix.parquet and runs/export/ledger.parquet
+```
+
+`cascade eval` refuses data it cannot trace to real runs: it needs the ledger export beside the
+matrix and requires every logged call to come from the `openai` provider.
+
+## The four steps
+
+1. **Review `docs/EVAL_PLAN.md` and confirm or change the margin.** Read section 5. The margin rule
+   gives **0.15** for any plausible test-split size, and the table there shows the cost: at 13 to 30
+   test tasks, even a router exactly as good as always-max has only a 23% to 45% chance of being shown
+   non-inferior, so the headline will often be reported as INCONCLUSIVE. That outcome will be
+   reported as it is, not retried and not re-margined. Do this **before looking at any dev result**,
+   so the margin cannot be tuned to a result. If you change it, edit `MARGIN_CANDIDATES`,
+   `MARGIN_CAP`, `ASSUMED_DISCORDANCE`, or `POWER_TARGET` in `cascade/evals/bootstrap.py`, update the
+   table in the plan to match, and commit both (a test fails if they disagree). Two other things in the
+   plan to confirm: **section 4 reports the router built on issue-side features as the primary one and
+   the gold-derived-feature router only as an upper bound** (the brief listed `src_files`,
+   `src_lines`, `test_runtime_s`, which a deployed router would not have; `DECISIONS.md` 84), and the
+   two primary comparisons are `cascade` and `predictive_issue` with no multiplicity correction.
+
+2. **Commit and tag.** The final run refuses unless the plan is committed and the tree is clean.
+
+```bash
+git status                     # must show nothing to commit
+git tag -a eval-plan-v1 -m "evaluation plan confirmed"
+```
+
+   The lock records the commit hash and the plan's blob hash, so the tag is a convenient name for what
+   was confirmed.
+
+3. **Run the final evaluation exactly once.**
+
+```bash
+uv run cascade eval --final
+```
+
+   It refuses without touching anything if the plan is uncommitted, the tree is dirty, a lock exists
+   (in the tree or in git history), the data is synthetic, the matrix mixes processing tiers, or there
+   are no train or test tasks. Otherwise it writes `FINAL.lock.json` **first**, fits the router on
+   train only, evaluates the test tasks once, and writes `results/final/report.md`,
+   `results.json`, and `pareto.svg`. Afterwards commit the lock (`git add FINAL.lock.json && git commit`):
+   committing it is what makes the "already run" check hold even if the file is later deleted. **Do not
+   delete or edit the lock.** If the run fails after the lock is written, the single run is spent; tell
+   me what happened and we will record it as a deviation rather than retry.
+
+4. **Paste the output into the chat before any writeup.** The whole terminal output, which includes
+   the stamp (data source, commit, matrix hash). Nothing should be written up from the numbers before
+   we have looked at them together, including the INCONCLUSIVE cases.
+
+## Optional, before step 1: the dev analysis on real data
+
+```bash
+uv run cascade eval            # train/CV only; never reads a test row; writes results/dev/real-<hash>/
+```
+
+It prints the policy table, the headline comparison (labelled TRAIN/CV, not evidence), per-repo,
+Verifier FP/FN, the ablation analysis (mid arm: default vs no_reproducer vs no_reviewer), and the
+repeat-subset noise estimate. It is for finding bugs and for deciding whether the experiment is
+worth finishing, not for tuning the plan.
+
+## Decisions I need from you
+
+1. The margin rule (step 1) and the primary feature set (step 1).
+2. Everything in "Before step 1": the earlier stops are still open.
+3. After step 3: whether the result changes what the writeup should claim (an INCONCLUSIVE or null
+   result is a legitimate outcome and should be written up as one).
+
+---
+
+# Prerequisite: the matrix (STOP D, still open)
 
 Nothing in Phase 4 has spent money or touched a real service: everything was dry-run on the mock
 provider with synthetic tasks (`STATUS.md`). The seven steps you asked for are below, in order. They
 cannot start yet, because **the audited tasks do not exist and the configs are not filled**. Those
 prerequisites come first, and they are all yours.
 
-## Before step 1: what only you can supply
+## Before the pilot: what only you can supply
 
 **A. Audited tasks.** `tasks/manifest.jsonl` and `tasks/audit.jsonl` are empty, and there is no split.
 Do "Prerequisite: the audit" further down (token, date window, `taskgen run-all`, split, audit,
@@ -124,9 +207,9 @@ uv run cascade export
    reasoning, cached), spend by arm and by bucket, and the number of tests in this repo; every
    number comes from an artifact. `export` writes `runs/export/matrix.parquet` and `ledger.parquet`.
 
-## Decisions I need from you
+## Decisions I need from you (STOP D)
 
-1. Everything under "Before step 1": the prices and rules (and whether long-context applies as I
+1. Everything under "Before the pilot": the prices and rules (and whether long-context applies as I
    implemented it), the budget numbers, the flex multiplier (only if supported), and the optional
    arms' definitions.
 2. The audit and the split (see the prerequisite below; the repo-level split cannot reach 25-30 test
@@ -257,7 +340,7 @@ repos, a longer window, or relaxing a filter, and each is your call.
 2. **The split choice** (part B): accept a smaller test split, hold out click, or add repos.
 3. **The audit** (part C): the only step that cannot be automated, and the one that decides what
    enters the experiment.
-4. The models and budget configs (step "Before step 1", B and C, above) are independent of the audit,
+4. The models and budget configs (section "Before the pilot", B and C, above) are independent of the audit,
    but the pilot needs both the audit and the configs.
 
 ---

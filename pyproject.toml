@@ -5,6 +5,7 @@ description = "Cost-aware routing of models and reasoning effort for agentic Git
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "numpy==2.4.6",
     "openai-agents==0.23.1",
     "pyarrow==25.0.1",
     "pydantic==2.13.5",

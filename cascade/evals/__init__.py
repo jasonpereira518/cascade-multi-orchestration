@@ -1,1 +1,1 @@
-"""Metrics, plots, and report generation. Every number is computed from logged runs."""
+"""Evaluation of routing policies: metrics, bootstrap CIs, plots, reports, final-run guard."""

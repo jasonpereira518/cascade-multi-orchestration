@@ -1,23 +1,82 @@
 # Status
 
-**Stage:** STOP D (Phase 4: matrix runner, sizing, calibration, ablations) reached. Halted for the human; see `NEXT.md`.
+**Stage:** STOP E (Phase 5: routing policies and evals) reached. Halted for the human; see `NEXT.md`.
 **Updated:** 2026-10-04
 
-**Acceptance (Phase 4):** every new command dry-runs end to end on the mock provider
-(`tests/test_matrix_cli.py`: pilot, size, calibrate, matrix, ablate, repeat-subset, stats, export),
-and `make check` passes (783 passed, 2 skipped, 1 deselected; `make smoke` passes). Stated plainly,
-what this does and does not show:
-- **The dry run uses 6 SYNTHETIC tasks** over 2 synthetic repo names, mock models, and invented
-  prices. It proves the plumbing, caps, ordering, resumption, and train-only draws. It says nothing
-  about real tasks, real costs, or real model behaviour.
-- **No real input existed.** The manifest and audit log are empty, there is no split, no skeleton run
-  was ever made, and `models.yaml` / `budget.yaml` were unfilled. So the audited counts are zero and
-  **the "sizing table from skeleton-run priors" cannot be produced** (below). I did not assume numbers.
-- **Pre-flight on the real manifest** could not run (no audited tasks); the command refuses with
-  that message. It was verified on the synthetic fixture task, including planted leaks.
-- **Flex is implemented but unverified live** (`DECISIONS.md` 70). Nothing real was called: **$0 spent.**
+**Acceptance (Phase 5):** tests pass, the synthetic run is reproducible given the seed, the lock guard
+and the mixed-tier refusal are tested, and `make check` passes (931 passed, 2 skipped, 1 deselected;
+`make smoke` passes). Stated plainly:
+- **There is no real matrix, so there are no real dev-split (train/CV) results to report.** `runs/export/`
+  does not exist, the manifest and audit log are empty, and nothing has been spent. `cascade eval` on
+  the real paths refuses: `error: no matrix at runs/export/matrix.parquet; run the matrix and
+  `cascade export` first`. The brief's "dev analysis on the real matrix if it exists" did not apply.
+- **Everything was developed and tested on the labeled-SYNTHETIC matrix** under `tests/synthetic/`
+  (invented tasks, success rates, costs; stamped `data_source=synthetic`). The tables below are from
+  that data and show the report format, not findings.
+- **The test split was never touched.** `docs/EVAL_PLAN.md` was committed first (`b349a76`). I did
+  invoke `cascade eval --final` once on the real repo while checking refusals; it was refused at the
+  first guard check (dirty working tree) before any data was read, and I confirmed no `FINAL.lock.json`,
+  no `results/`, and no lock in git history. The single final run is intact.
 
-## Audited counts (output of `uv run cascade stats` on the real artifacts today)
+## What was built
+
+- **`routing/features.py`:** model-free features only, in two groups: issue-side (computable before an
+  attempt) and gold-derived (`src_files`, `src_lines`, `test_runtime_s`, hunks, fail_to_pass count,
+  symbols the fix touches), which a deployed router would not have. `DECISIONS.md` 84.
+- **`routing/policies.py` and `learn.py`:** fixed, cascade, oracle, and the predictive router
+  (per-arm L2 logistic regression and a ridge cost model, in numpy), all evaluated by offline lookup;
+  leave-one-repo-out CV, the plan's selection rule, nested CV for honest dev numbers.
+- **`evals/`:** a loader with provenance, the one-tier refusal, default-pipeline-only rows and cap
+  normalization; paired bootstrap CIs (10,000 resamples, seed 4242) with a repo-clustered sensitivity
+  check; the headline non-inferiority verdict; per-repo, Verifier FP/FN, ablation and noise analyses;
+  a deterministic SVG Pareto plot; Markdown/JSON reports; and `final.py`, the one-shot guard.
+- **`docs/EVAL_PLAN.md`:** committed first. **`cascade eval`** (dev: train/CV only) and
+  **`cascade eval --final`** (once, guarded). **`tests/synthetic/`:** the labeled generator.
+- Only new dependency: numpy 2.4.6, pinned.
+
+| Check | Result |
+|---|---|
+| `make check` (ruff, format, pyright strict, pytest) | exit 0; 931 passed, 2 skipped (real-Docker test; the shipped-prices test), 1 deselected (smoke) |
+| New Phase 5 tests | 148: policies 32, bootstrap 24, metrics 20, data 31, run and CLI 16, final guard 19, generator 6 |
+| Mutation check on the new logic (37 deliberate breakages, scratch edits restored) | 34 caught first time; 3 survived and each exposed a test gap (nested selection could see the held-out repo; the cost model's smearing correction was untested; the value scale's source was untested). Each now has a test and **all 37 are caught**, including: a final/dev load that also reads test, each guard check disabled one at a time, LORO including the held-out repo, mixed tiers allowed, a mock ledger accepted as real |
+| Reproducibility | the dev report, JSON, and SVG are byte-identical across two runs and across two regenerations of the same synthetic seed; a different seed changes them |
+| Real matrix, real Docker, real model | **not exercised** |
+
+A bug found by review and fixed: the weighted median returned the lower middle value for an even
+count (unlike `np.median`); it now averages the two middle values, with brute-force even/odd tests.
+
+## Dev analysis output (SYNTHETIC data, TRAIN/CV, 10,000 resamples; format demonstration only)
+
+`data_source=synthetic | matrix=8d7747d145ccc309 | tier=standard | splits=train`, 36 train tasks in 3
+repos, margin 0.15 (the rule, for 17 synthetic test tasks). **The report itself warns that intervals are
+wide at this size and that repo-clustered intervals rest on 3 repos.**
+
+| policy | resolve rate | cost / task | cost / resolved |
+|---|---|---|---|
+| always_cheap | 0.361 [0.222, 0.528] | $0.0694 [$0.0585, $0.0816] | $0.1921 [$0.1189, $0.3679] |
+| always_mid | 0.472 [0.306, 0.639] | $0.1485 [$0.1237, $0.1767] | $0.3144 [$0.2111, $0.5243] |
+| always_max | 0.639 [0.472, 0.778] | $0.7085 [$0.6216, $0.8034] | $1.1090 [$0.8111, $1.6163] |
+| cascade | 0.722 [0.556, 0.861] | $0.3446 [$0.2109, $0.5004] | $0.4772 [$0.2791, $0.7711] |
+| oracle (bound) | 0.833 [0.694, 0.944] | $0.2268 [$0.1472, $0.3175] | $0.2722 [$0.1775, $0.3832] |
+| predictive_issue | 0.556 [0.389, 0.722] | $0.2727 [$0.1886, $0.3673] | $0.4908 [$0.3236, $0.7439] |
+| predictive_all (upper bound) | 0.528 [0.361, 0.694] | $0.4919 [$0.3790, $0.6094] | $0.9321 [$0.6384, $1.4366] |
+
+Headline verdicts on this invented data: cascade MET, predictive_issue INCONCLUSIVE, always_cheap and
+always_mid INCONCLUSIVE (the clustered check calls always_cheap INFERIOR). Those verdicts describe the
+synthetic generator, which was built so the cascade has something to find; they say nothing about
+Cascade. The full report (per-repo, Verifier FP/FN, ablations, noise) is written by `cascade eval`.
+
+## Sizing note carried forward
+
+At the likely test size the headline will often be INCONCLUSIVE regardless of the truth: with 25 test
+tasks, a router exactly as good as always-max has about a 39% chance of being shown non-inferior at
+margin 0.15 (`docs/EVAL_PLAN.md` section 5). The plan commits to reporting that as it is.
+
+## Spend
+
+**$0.** No real call was made in this phase or any earlier one.
+
+## Audited counts at STOP D (output of `uv run cascade stats`; unchanged: no real artifacts exist yet)
 
 ```
 repos with audited-ok tasks: 0 (none)
@@ -51,7 +110,7 @@ and at the p90, with the Flex and drop-the-mid-arm options, and stops for your d
 matrix covers fewer than 40 tasks at the p90. Pilot, ablation, and repeat spending come out of their
 own buckets, on top of the matrix bucket.
 
-## Phase 4 (this stop)
+## Phase 4 (previous stop)
 
 - **Matrix runner** (`routing/matrix.py`): resumable over (audited task x arm x seed); tasks shuffled
   with a fixed seed, all arms cheap to max before the next task, so any prefix is a random sample with
@@ -274,4 +333,13 @@ commented, and no token handled by me. The pipeline itself still reads only `GIT
     dominant); a pilot can still miss a task type that matters.
 12. **Flex is unverified live,** including whether the gpt-6 models support it, how often agent loops
     hit `429 Resource Unavailable`, and whether queueing makes a matrix impractically slow.
+13. **The final evaluation is small by construction.** A repo-level test split of 13 to 30 tasks from
+    one to three repos gives wide intervals, and a repo-clustered bootstrap over 1 to 3 repos is
+    unreliable. The result may reflect which repos landed in test.
+14. **The cascade number rests on the independence assumption** (`DECISIONS.md` 83): later arms are
+    assumed to behave as they did stand-alone, and one sampled outcome per cell is assumed to be the
+    arm's outcome. The repeat-subset flip rate is the only check on the second assumption.
+15. **The primary predictive router excludes the features the SPEC listed** (`src_*`, `test_runtime_s`)
+    because they are gold-derived; if you want them in the primary router the plan changes (item 84).
+16. **The margin and its assumed discordance (0.20) are proposals awaiting your confirmation.**
 

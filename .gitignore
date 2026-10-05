@@ -29,3 +29,5 @@ KILL_SWITCH
 .DS_Store
 .idea/
 .vscode/
+# dev evaluation outputs (FINAL.lock.json is NOT ignored: it is committed)
+results/

@@ -367,3 +367,84 @@ Non-obvious choices, newest last. Each says what was chosen, why, and what would
     `<runs-dir>/export`; a first draft defaulted to the working directory and wrote files into the
     repo during a test, which a regression test now prevents.
 
+## Phase 5 (routing policies and evals)
+
+77. **No real matrix exists, so no real analysis was run.** `runs/export/` is absent, the manifest and
+    audit log are empty, and nothing has been spent. Everything was developed and tested on the
+    labeled-synthetic matrix under `tests/synthetic/`. The brief's "dev analysis on the real matrix if
+    it exists" therefore did not happen; `cascade eval` on the real paths refuses with a clear error.
+78. **Provenance is established from artifacts, not asserted.** Data is `synthetic` only if the
+    directory carries the `SYNTHETIC.json` marker the test generator writes. Otherwise it is `real`
+    only if `ledger.parquet` exists, is non-empty, and every logged call came from the `openai`
+    provider, and the matrix's total cost does not exceed the ledger's (rows must be backed by logged
+    calls). A mock-provider matrix, a matrix without a ledger, and a hand-made parquet are all refused.
+    One directory, one source: synthetic and real are never combined. Every output is stamped with the
+    data source, git commit and dirty flag, the SHA-256 of the matrix file's raw bytes, the tier, and
+    the splits.
+79. **What a "default-pipeline row" is.** Seed 0 and the full pipeline (reproducer and reviewer on).
+    If more than one distinct such config exists the load is refused as ambiguous (a changed
+    `--max-output-tokens` mid-experiment would otherwise silently mix configurations). Ablation rows
+    are mid-arm rows that differ from the default only by switching exactly one of those two roles off;
+    repeat rows are default-config rows with another seed. Neither feeds a policy.
+80. **Cap-exceeded cells are failures that keep their cost.** The runner does not emit the string
+    `cap_exceeded`; it records `BudgetExceededError: attempt cap ...` and similar. The loader treats an
+    error containing `cap_exceeded`, `attempt cap`, `attempt token cap`, or `task cap` as a cap hit and
+    sets `true_success` and `verifier_claimed` to false (so a cascade escalates past it), because a
+    partial patch that happened to pass is not a result the pipeline produced within its budget. The
+    count is reported. Global, bucket, and kill-switch interruptions never reach the matrix (Phase 4).
+81. **Mixed tiers are refused over the whole file, without reading outcomes.** The `processing_tier`
+    column of EVERY row is checked, including test-split rows, because a tier mix anywhere makes costs
+    incomparable. Reading one column of a split is not using that split's outcomes. A mix is refused
+    before anything is evaluated and, for `--final`, before the lock is written.
+82. **Dev runs never materialize a test row.** The parquet read pushes a `task_id IN (train ids)`
+    filter down to pyarrow, so test rows stay on disk; a test spies on the read and asserts it. The
+    margin rule needs only the COUNT of audited test tasks, taken from the manifest. The matrix hash is
+    of file bytes, so computing it parses nothing.
+83. **Cascade, oracle, and the independence assumption.** Cascade: escalate while `verifier_claimed`
+    is false; cost is the sum over arms tried; outcome is `true_success` of the last arm tried, so a
+    false positive stops it and counts as a failure. Oracle: the cheapest arm by that task's observed
+    cost among successful arms, else the cheapest by observed cost (observed cost can reorder arms on a
+    task). The cascade lookup assumes each cell is an independent stand-alone run (no information
+    forwarded from a failed attempt) and that one sampled outcome is the arm's outcome; the repeat-seed
+    flip rate measures the second assumption. Written into `policies.py` and `docs/EVAL_PLAN.md`.
+84. **DEVIATION FLAGGED: two feature sets, and the primary one excludes the gold-derived features.**
+    The brief lists `src_files`, `src_lines`, and `test_runtime_s` as triage features. They are
+    measured on the gold patch or the test run, so a deployed router would not have them before the fix
+    exists. `routing/features.py` builds all of them, tagged by group; the plan reports `predictive_issue`
+    (issue-side features only) as the primary, deployable router and `predictive_all` as an upper bound.
+    If you want the gold-derived features in the primary router, say so before the plan is confirmed.
+85. **The two small models are plain numpy, not scikit-learn.** An L2 logistic regression by Newton's
+    method (standardized features, unpenalized intercept; the penalty keeps it finite on an all-success
+    or all-failure arm) and a ridge regression of log cost with Duan smearing. Deterministic, typed,
+    and no heavyweight dependency. The only dependency added this phase is numpy 2.4.6, pinned.
+86. **The selection rule and nested CV.** Leave-one-repo-out on train; a candidate (C, value
+    multiplier) is feasible if its pooled out-of-fold resolve rate is at least always-max's minus
+    delta/2 (a stricter bar than the evaluation margin, to leave room for test noise); choose the
+    cheapest feasible; ties go to smaller C then smaller multiplier; none feasible means always-max.
+    Dev numbers use NESTED CV (selection repeated inside each outer fold) because the CV of a
+    configuration chosen on the same folds is optimistic; with fewer than 3 repos nested CV is
+    impossible and the report says it is showing the optimistic number.
+87. **The margin rule, and why the headline will often be inconclusive.** delta is the smallest of
+    {0.05, 0.10, 0.15} with at least 50% power (when the policy is exactly as good as always-max,
+    assuming 20% of tasks differ), capped at 0.15. At 13 to 30 test tasks the power at 0.15 is only
+    23% to 45%. The cap exists so the margin is never loosened to manufacture a pass; the plan states
+    that an inconclusive verdict will be reported as inconclusive, not retried or re-margined. The
+    plan's power table is checked against the code by a test. **Awaiting your confirmation.**
+88. **Bootstrap design.** Every resample is a weight matrix so policies are compared on identical
+    resamples (paired). 10,000 resamples, seed 4242, 95% percentile intervals; a repo-clustered scheme
+    as a sensitivity check (flagged as unreliable under 5 repos); statistics undefined in a resample
+    (cost per resolved with nothing resolved) are excluded and counted. A review-found bug: the weighted
+    median returned the lower middle value for an even count, unlike `np.median`; fixed, with
+    brute-force tests for even and odd counts.
+89. **The final guard.** `cascade eval --final` requires: the plan committed (present in HEAD), a clean
+    working tree, no `FINAL.lock.json` in the tree or anywhere in git history (so deleting and rerunning
+    is refused), real data, one tier, and train and test tasks. It loads train and test in two calls,
+    writes the lock with an exclusive create (commit, plan blob hash, matrix hash, margin, n) BEFORE
+    evaluating, fits on train only, evaluates the test tasks once, and records output hashes. A failure
+    after the lock is written marks it `failed` and the run stays used: recovery is a deliberate human
+    act. Refusals that happen before the lock (synthetic, mixed tier, missing data, dirty tree) do not
+    spend the run. The lock is committed by the human, which is what makes the history check bite.
+90. **Pareto plot is hand-written SVG.** No plotting dependency, byte-for-byte reproducible, and the
+    provenance stamp is printed on the figure. Dev outputs go to `results/dev/<source>-<hash>/`
+    (gitignored); the final outputs go to `results/final/` and the lock is at the repo root, tracked.
+
