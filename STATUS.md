@@ -321,19 +321,22 @@ Docker, or any prompt quality.
 <!-- attrition:pallets/click:begin -->
 ### pallets/click
 
-Window 2026-06-17 to 2026-09-20. Computed from `runs/taskgen/pallets__click/w-2026-06-17_2026-09-20/state.sqlite` at 2026-10-05 20:16 UTC; every number below is a count of logged stage results.
+Window 2026-06-17 to 2026-09-20. Computed from `runs/taskgen/pallets__click/w-2026-06-17_2026-09-20/state.sqlite` at 2026-10-06 18:25 UTC; every number below is a count of logged stage results.
 
 | Stage | Entered | Passed | Dropped | Error (retry) | Pending |
 |---|---:|---:|---:|---:|---:|
-| filter (metadata rules) | 0 | 0 | 0 | 0 | 0 |
-| patch (git diff, size rules) | 0 | 0 | 0 | 0 | 0 |
-| env build + smoke run | 0 | 0 | 0 | 0 | 0 |
-| validation (3x pre/post) | 0 | 0 | 0 | 0 | 0 |
+| filter (metadata rules) | 53 | 7 | 46 | 0 | 0 |
+| patch (git diff, size rules) | 7 | 6 | 1 | 0 | 0 |
+| env build + smoke run | 6 | 5 | 1 | 0 | 0 |
+| validation (3x pre/post) | 5 | 5 | 0 | 0 | 0 |
 
-**Funnel:** 0 candidates -> 0 after filters -> 0 env builds -> 0 validated.
+**Funnel:** 53 candidates -> 6 after filters -> 5 env builds -> 5 validated.
 
+- Drops at filter: no_closing_issue (19), not_default_branch (18), multiple_closing_issues (5), docs_only (2), dependency_pr (1), no_test_files (1)
+- Drops at patch: diff_mismatch (1)
+- Drops at env: env_collect_failed (1)
 
-**Projection:** 0 validated over 96 days is about 0.0 per month (0 per 12 months) for this repo. Linear extrapolation from one window; treat as a rough order of magnitude.
+**Projection:** 5 validated over 96 days is about 1.6 per month (19 per 12 months) for this repo. Linear extrapolation from one window; treat as a rough order of magnitude.
 <!-- attrition:pallets/click:end -->
 ## Repos added at the human's request (jinja, attrs, structlog, marshmallow)
 
